@@ -1,0 +1,13 @@
+[package]
+name = "temporal_core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "ArkFS cactus-stack temporal engine; durability via PersistentObjectStore"
+
+[dependencies]
+arkfs_core = { workspace = true }
+persistent_object_store = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

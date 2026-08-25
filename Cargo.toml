@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = [
+    "libs/rust/arkfs_core",
+    "libs/rust/simulation_harness",
+    "libs/rust/persistent_object_store",
+    "libs/rust/temporal_core",
+]
+
+[workspace.package]
+edition = "2021"
+license = "UNLICENSED"
+version = "0.1.0"
+
+[workspace.dependencies]
+arkfs_core = { path = "libs/rust/arkfs_core" }
+simulation_harness = { path = "libs/rust/simulation_harness" }
+persistent_object_store = { path = "libs/rust/persistent_object_store" }
+temporal_core = { path = "libs/rust/temporal_core" }
+blake3 = "1.5"
+serde = { version = "1.0", features = ["derive"] }
+thiserror = "2.0"
+tempfile = "3.14"

@@ -1,0 +1,12 @@
+[package]
+name = "persistent_object_store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "ArkFS safe-write object store: fsync + quorum before success"
+
+[dependencies]
+arkfs_core = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

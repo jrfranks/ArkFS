@@ -1,0 +1,11 @@
+[package]
+name = "arkfs_core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "ArkFS shared types: ObjectID, Timestamp, FileAttributes superset, errors"
+
+[dependencies]
+blake3 = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }

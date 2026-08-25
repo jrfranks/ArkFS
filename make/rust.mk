@@ -1,0 +1,15 @@
+# Rust library targets (Cargo workspace is a convenience; Make remains the organizer).
+
+.PHONY: build-rust test-rust fmt-rust clean-rust
+
+build-rust:
+	cd $(ROOT) && cargo build --workspace
+
+test-rust:
+	cd $(ROOT) && cargo test --workspace
+
+fmt-rust:
+	cd $(ROOT) && cargo fmt --all
+
+clean-rust:
+	cd $(ROOT) && cargo clean

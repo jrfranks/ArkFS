@@ -1,0 +1,10 @@
+[package]
+name = "simulation_harness"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "ArkFS interplanetary simulation: clock, delay, chaos injection"
+
+[dependencies]
+arkfs_core = { workspace = true }
+serde = { workspace = true }

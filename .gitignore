@@ -1,0 +1,11 @@
+/target/
+**/*.rs.bk
+_build/
+deps/
+*.beam
+erl_crash.dump
+.elixir_ls/
+.DS_Store
+*.swp
+.idea/
+.vscode/
