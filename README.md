@@ -2,7 +2,7 @@
 
 Sovereign continuous temporal distributed file system. Data follows the owner (Earth → Moon → Mars). Never-delete with arbitrary timestamp access. Private clusters. Custom modular code (Elixir orchestration + Rust performance paths).
 
-See [SPEC.md](SPEC.md) for the product specification and the implementation plan phases.
+**New maintainers:** start at [docs/maintainer.md](docs/maintainer.md) (glossary, on-disk layout, request path, tests, traps). Product spec: [SPEC.md](SPEC.md).
 
 ## Organization
 
@@ -23,7 +23,7 @@ make build
 make ci
 ```
 
-GitHub Actions runs `make ci` on push and pull request. See [`.github/CONTRIBUTING.md`](.github/CONTRIBUTING.md).
+GitHub Actions runs `make ci` (fmt + package tests, no proofs). Local commits run the full bar via `.githooks/pre-commit` (`make install-hooks` once). See [`.github/CONTRIBUTING.md`](.github/CONTRIBUTING.md).
 
 ## Phase 0 libraries
 
@@ -37,6 +37,7 @@ GitHub Actions runs `make ci` on push and pull request. See [`.github/CONTRIBUTI
 | App | Role |
 |-----|------|
 | `sim_runner` | Runs Elixir harness scenarios (clock / delay / chaos). Store and temporal tests live in `cargo test`. |
+| `arkfs` | Single-node FUSE mount (`arkfs mount --data DIR MOUNTPOINT`). See [docs/fuse.md](docs/fuse.md). |
 
 ## Attribute model
 

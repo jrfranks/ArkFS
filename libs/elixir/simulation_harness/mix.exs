@@ -1,3 +1,4 @@
+# Independent Mix project (no umbrella). Make iterates packages with mix.exs.
 defmodule SimulationHarness.MixProject do
   use Mix.Project
 

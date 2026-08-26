@@ -1,5 +1,10 @@
 defmodule SimRunner.CLI do
-  @moduledoc false
+  @moduledoc """
+  Escript entry (`mix.exs` `escript: [main_module: SimRunner.CLI]`).
+
+  Prints one line per scenario and exits 1 if any harness or oracle fails.
+  Arguments are ignored; the catalog is `SimRunner.scenarios/0`.
+  """
 
   def main(_args) do
     results = SimRunner.run_all()

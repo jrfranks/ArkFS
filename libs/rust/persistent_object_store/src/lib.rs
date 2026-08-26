@@ -2,6 +2,37 @@
 //!
 //! `put` returns success only after a local durable staging write, quorum
 //! acknowledgments, and an atomic publish of the primary object name.
+//!
+//! # Mental model
+//!
+//! This crate does **not** know about files, directories, or FUSE. It stores
+//! opaque blobs named by `blake3(blob)`. TemporalCore puts file bytes, encoded
+//! attributes, and the encoded index all through the same `put`.
+//!
+//! Layout under the store root (FUSE `--data DIR` uses `DIR/primary`):
+//!
+//! ```text
+//! <root>/objects/<64-hex>.obj    immutable payload
+//! <root>/anchors/<name>          32-byte ObjectId pointer (today: temporal_index)
+//! ```
+//!
+//! Staging file is a sibling `*.tmp`. Never `write` the final name in place.
+//!
+//! # Replication
+//!
+//! [`ReplicationBackend`] is the cross-node comms hook. The local write always
+//! counts as 1 ack (`require_quorum`). Remotes are extra.
+//!
+//! - [`LocalQuorum`]: writes extra directories (cluster *simulation*).
+//! - [`open_local_quorum_store`]: first name is primary, `skip(1)` are remotes.
+//!   A one-element list therefore has **zero remotes** — implicit isolation.
+//!
+//! Single-node FUSE must behave as if **no peers exist**. Prefer an explicit
+//! backend whose `replicate_*` returns 0 and `always_on_count` is 0, and which
+//! never creates `replicas/`. Do not treat an empty `LocalQuorum` as that
+//! contract unless you are only writing harness tests.
+//!
+//! Onboarding: `docs/maintainer.md` (safe-write + isolation sections).
 
 use arkfs_core::{ArkError, ObjectId, QuorumPolicy};
 use std::collections::HashSet;
@@ -24,6 +55,9 @@ impl IntegrityReport {
 }
 
 /// Backend for quorum replication. Phase 0 ships [`LocalQuorum`].
+///
+/// Return values are **remote** acks only (not including local). Isolated
+/// implementations return `Ok(0)` and `always_on_count() == 0`.
 pub trait ReplicationBackend: Send + Sync {
     /// Replicate object bytes to peers. Returns successful remote acks.
     fn replicate_object(&self, id: &ObjectId, data: &[u8]) -> Result<u32, ArkError>;
@@ -36,6 +70,9 @@ pub trait ReplicationBackend: Send + Sync {
 }
 
 /// In-process replica directories simulating cluster peers of the primary.
+///
+/// Used by harness tests (`open_local_quorum_store` with several names).
+/// `lose_node` / `restore_node` simulate partition without real networking.
 pub struct LocalQuorum {
     replica_dirs: Vec<(String, PathBuf)>,
     lost: Mutex<HashSet<String>>,
@@ -117,6 +154,11 @@ impl PersistentObjectStore {
     }
 
     /// Store bytes; **blocks until safe** (local fsync + quorum + publish).
+    ///
+    /// If the object already exists, still attempts `replicate_object` so a
+    /// late-joining replica can catch up, then returns the id without rewriting
+    /// the primary. Quorum failure on a *new* object deletes the staging file
+    /// and does not publish.
     pub fn put(&self, data: &[u8], quorum: QuorumPolicy) -> Result<ObjectId, ArkError> {
         let id = ObjectId::from_bytes(data);
         let final_path = self.object_path(&id);
@@ -134,6 +176,7 @@ impl PersistentObjectStore {
         Ok(id)
     }
 
+    /// Read and re-hash. Checksum mismatch is [`ArkError::Integrity`], not silent.
     pub fn get(&self, id: &ObjectId) -> Result<Vec<u8>, ArkError> {
         let path = self.object_path(id);
         let data = match fs::read(&path) {
@@ -154,6 +197,7 @@ impl PersistentObjectStore {
         Ok(data)
     }
 
+    /// Scan every `*.obj` under `objects/` and re-hash. Used by FUSE `statfs`.
     pub fn verify_integrity(&self) -> Result<IntegrityReport, ArkError> {
         let dir = self.root.join("objects");
         let mut report = IntegrityReport {
@@ -194,6 +238,7 @@ impl PersistentObjectStore {
         Ok(report)
     }
 
+    /// Atomically publish a named 32-byte root pointer (same safe-write as `put`).
     pub fn set_anchor(
         &self,
         name: &str,
@@ -210,6 +255,7 @@ impl PersistentObjectStore {
         Ok(())
     }
 
+    /// `Ok(None)` if the name has never been set. Wrong length is Integrity.
     pub fn get_anchor(&self, name: &str) -> Result<Option<ObjectId>, ArkError> {
         validate_anchor_name(name)?;
         let path = self.anchor_path(name);
@@ -240,6 +286,7 @@ impl PersistentObjectStore {
         self.root.join("anchors").join(name)
     }
 
+    /// Local write counts as +1. On failure, delete `staging` so the name is unpublished.
     fn require_quorum(
         &self,
         remote_acks: u32,
@@ -261,6 +308,7 @@ impl PersistentObjectStore {
     }
 }
 
+/// Anchors are `[A-Za-z0-9_]+` so they are safe as a single path component.
 fn validate_anchor_name(name: &str) -> Result<(), ArkError> {
     if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
         return Err(ArkError::invalid_argument("invalid anchor name"));
@@ -268,12 +316,14 @@ fn validate_anchor_name(name: &str) -> Result<(), ArkError> {
     Ok(())
 }
 
+/// Staging name: `abc.obj` → `abc.obj.tmp` (unique per final filename).
 fn sibling_tmp(path: &Path) -> PathBuf {
     let mut name = path.file_name().unwrap_or_default().to_os_string();
     name.push(".tmp");
     path.with_file_name(name)
 }
 
+/// `rename` staging → final, then `fsync` the parent directory (crash safety).
 fn publish(staging: &Path, final_path: &Path) -> Result<(), ArkError> {
     let parent = final_path
         .parent()
@@ -282,6 +332,7 @@ fn publish(staging: &Path, final_path: &Path) -> Result<(), ArkError> {
     fsync_dir(parent)
 }
 
+/// Write `path` via a sibling tmp, `sync_all`, rename, fsync parent.
 fn write_fsync(path: &Path, data: &[u8]) -> Result<(), ArkError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(ArkError::from)?;
@@ -299,6 +350,7 @@ fn write_fsync(path: &Path, data: &[u8]) -> Result<(), ArkError> {
     Ok(())
 }
 
+/// Directory fsync so a rename is durable. Open the dir as a file and `sync_all`.
 fn fsync_dir(path: impl AsRef<Path>) -> Result<(), ArkError> {
     let f = File::open(path.as_ref()).map_err(ArkError::from)?;
     f.sync_all().map_err(ArkError::from)?;
@@ -306,6 +358,10 @@ fn fsync_dir(path: impl AsRef<Path>) -> Result<(), ArkError> {
 }
 
 /// Primary at `base/primary`; remaining names are remote replica directories.
+///
+/// `replica_names[0]` is the primary label (not a remote). `skip(1)` become
+/// `base/replicas/<name>`. A single name therefore opens a store with an
+/// **empty** [`LocalQuorum`] — implicit isolation, still a cluster backend.
 pub fn open_local_quorum_store(
     base: impl AsRef<Path>,
     replica_names: &[&str],

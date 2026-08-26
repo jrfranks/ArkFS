@@ -1,6 +1,9 @@
+//! FUSE getattr/setattr projection. Does not talk to the kernel; `fuse_facade`
+//! maps [`FuseStat`] onto `fuser::FileAttr`.
+
 use crate::attributes::{FileAttributes, FileType, PosixPatch, SizePolicy, Timespec};
 
-/// FUSE-facing stat projection (POSIX-oriented).
+/// FUSE-facing stat projection (POSIX-oriented). `mode` includes `S_IF*` bits.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FuseStat {
     pub ino: u64,
@@ -21,6 +24,7 @@ pub struct FuseStat {
 /// Partial FUSE setattr; unset fields leave canonical values alone.
 pub type FuseSetAttr = PosixPatch;
 
+/// Project canonical attrs to FUSE stat. `blocks` is allocation_size / 512 (ceil).
 pub fn to_fuse(attrs: &FileAttributes) -> FuseStat {
     let blocks = attrs.allocation_size.div_ceil(512);
     FuseStat {
@@ -40,6 +44,7 @@ pub fn to_fuse(attrs: &FileAttributes) -> FuseStat {
     }
 }
 
+/// Apply a FUSE setattr patch. Unset fields (including gid/uid) stay put.
 pub fn merge_from_fuse(attrs: &mut FileAttributes, patch: &FuseSetAttr, now: Timespec) {
     attrs.apply_posix(patch, now, SizePolicy::GrowAllocation);
 }

@@ -4,6 +4,18 @@ defmodule SimulationHarness do
 
   Durable store and temporal mechanics are tested in the Rust crates. This
   library does not reimplement them.
+
+  ## What this package is allowed to claim
+
+  * Logical clock ticks (`clock_rate` scales wall nanoseconds per step).
+  * Mars delay override stored on scenario state.
+  * A log of intended bit-flips and lost nodes (`Chaos`).
+  * A *shape* check on a claimed path history (`validate_temporal_consistency`).
+
+  It does **not** open `PersistentObjectStore`, does not verify BLAKE3, and
+  does not prove cactus lookup. Those tests live in `cargo test`.
+
+  Maintainers: `docs/maintainer.md`.
   """
 
   alias SimulationHarness.{Chaos, Scenario, SimulationResult}

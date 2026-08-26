@@ -1,3 +1,6 @@
+//! NFSv4 fattr / setattr projection. Not wired to a server in Phase 0; kept so
+//! FUSE setattr cannot invent a second POSIX merge path later.
+
 use crate::attributes::{FileAttributes, FileType, PosixPatch, SizePolicy, Timespec};
 
 /// NFSv4-oriented attribute view.
@@ -48,6 +51,7 @@ impl Nfs4SetAttr {
     }
 }
 
+/// Project canonical attrs to NFSv4 fattr (Phase 0: used by tests, not a server).
 pub fn to_nfs4(attrs: &FileAttributes) -> Nfs4Fattr {
     Nfs4Fattr {
         fileid: attrs.file_id,
@@ -69,6 +73,7 @@ pub fn to_nfs4(attrs: &FileAttributes) -> Nfs4Fattr {
     }
 }
 
+/// Merge NFSv4 setattr. Owner/group names are extra POSIX fields; DOS flags stay.
 pub fn merge_from_nfs4(attrs: &mut FileAttributes, patch: &Nfs4SetAttr, now: Timespec) {
     attrs.apply_posix(&patch.posix(), now, SizePolicy::Logical);
     if let Some(ref owner) = patch.owner_name {

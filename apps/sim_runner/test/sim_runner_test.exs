@@ -1,4 +1,8 @@
 defmodule SimRunnerTest do
+  @moduledoc """
+  Every named catalog scenario must pass both harness and oracle.
+  Adding a scenario without an oracle fails this test.
+  """
   use ExUnit.Case, async: true
 
   test "all catalog scenarios pass harness + oracle" do

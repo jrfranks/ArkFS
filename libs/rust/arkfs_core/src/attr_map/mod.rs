@@ -2,6 +2,13 @@
 //!
 //! Facades must use these helpers so partial updates never clobber fields
 //! belonging to other protocols (read-modify-write of the full record).
+//!
+//! Pattern for every protocol:
+//! - `to_*` copies a **subset** out for getattr/stat.
+//! - `merge_from_*` applies a patch of `Option` fields; `None` means unchanged.
+//!
+//! Never `*attrs = FileAttributes::from(protocol_struct)` — that zeros SMB/macOS
+//! fields on a FUSE chmod. Tests in this module are the regression net.
 
 mod fuse;
 mod macos;

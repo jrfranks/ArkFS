@@ -1,3 +1,6 @@
+//! WebDAV live properties + dead-prop bag. Dead props are a string map; they
+//! are not xattrs. Display name is stored as `{DAV:}displayname` in that map.
+
 use crate::attributes::{FileAttributes, Timespec};
 use std::collections::BTreeMap;
 
@@ -22,6 +25,7 @@ pub struct WebDavSetProps {
     pub dead_props: BTreeMap<String, String>,
 }
 
+/// Project live WebDAV properties. Display name is `{DAV:}displayname` if present.
 pub fn to_webdav_props(attrs: &FileAttributes) -> WebDavProperties {
     let displayname = attrs.dead_props.get("{DAV:}displayname").cloned();
     WebDavProperties {
@@ -36,6 +40,7 @@ pub fn to_webdav_props(attrs: &FileAttributes) -> WebDavProperties {
     }
 }
 
+/// Merge WebDAV PROPPATCH. Dead-prop keys in the patch overwrite; others stay.
 pub fn merge_from_webdav(attrs: &mut FileAttributes, patch: &WebDavSetProps, now: Timespec) {
     if let Some(ref ct) = patch.content_type {
         attrs.content_type = Some(ct.clone());

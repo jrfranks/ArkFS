@@ -1,5 +1,11 @@
 defmodule SimulationHarness.Chaos do
-  @moduledoc false
+  @moduledoc """
+  Bookkeeping for intended faults. Does not mutate any on-disk object.
+
+  `inject_bit_flip/3` prepends `{node_id, block_id}` onto `:bit_flips`.
+  `inject/2` also unions `:lost_nodes`. The Rust store applies real flips in
+  `cargo test` (see `persistent_object_store` bit-flip test).
+  """
 
   def inject_bit_flip(state, node_id, block_id) do
     flips = Map.get(state, :bit_flips, [])

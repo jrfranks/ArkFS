@@ -1,4 +1,6 @@
-**ArkFS Build Plan – Specification v0.3**  
+**ArkFS Build Plan – Specification v0.3**
+
+Implementers of the current tree: start at [docs/maintainer.md](docs/maintainer.md). This spec is the product roadmap (phases 0–5); the code is Phase 0 plus a single-node FUSE facade.  
 **Ready for Grok Build Plan Mode Execution**
 
 **Project Name**: ArkFS  

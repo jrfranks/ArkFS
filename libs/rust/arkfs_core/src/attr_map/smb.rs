@@ -1,3 +1,6 @@
+//! SMB 3 FILE_NETWORK_OPEN_INFORMATION / SetInfo projection.
+//! `file_id` is **not** a SetInfo field — `merge_from_smb3` must not rewrite it.
+
 use crate::attributes::{DosFlags, FileAttributes, FileType, SizePolicy, Timespec};
 
 /// SMB 3 FILE_NETWORK_OPEN_INFORMATION-style view.
@@ -24,6 +27,7 @@ pub struct Smb3SetInfo {
     pub dos: Option<DosFlags>,
 }
 
+/// Project canonical attrs to SMB3 network-open info. Forces `dos.directory` from type.
 pub fn to_smb3(attrs: &FileAttributes) -> Smb3FileInfo {
     let mut dos = attrs.dos;
     dos.directory = matches!(attrs.file_type, FileType::Directory);
@@ -39,6 +43,7 @@ pub fn to_smb3(attrs: &FileAttributes) -> Smb3FileInfo {
     }
 }
 
+/// Merge SMB SetInfo. Does not touch `file_id`, macOS flags, xattrs, or dead props.
 pub fn merge_from_smb3(attrs: &mut FileAttributes, patch: &Smb3SetInfo, now: Timespec) {
     if let Some(t) = patch.creation_time {
         attrs.btime = t;

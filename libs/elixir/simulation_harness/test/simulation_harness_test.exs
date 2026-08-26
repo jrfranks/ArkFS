@@ -1,4 +1,7 @@
 defmodule SimulationHarnessTest do
+  @moduledoc """
+  Clock, delay, chaos-log, and history-shape tests. Not CAS or temporal lookup.
+  """
   use ExUnit.Case, async: true
 
   alias SimulationHarness.Scenario

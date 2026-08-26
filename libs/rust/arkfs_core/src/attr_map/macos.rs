@@ -1,3 +1,6 @@
+//! macOS getattrlist / UF_*/SF_* projection. Resource forks are named streams,
+//! not xattrs. `merge_from_macos` must not clear DOS flags or WebDAV dead props.
+
 use crate::attributes::{FileAttributes, MacOsFlags, NamedStream, Timespec};
 use std::collections::BTreeMap;
 
@@ -28,6 +31,7 @@ pub struct MacOsSetAttr {
     pub xattrs_remove: Vec<String>,
 }
 
+/// Project canonical attrs to a getattrlist-style view (includes xattr map).
 pub fn to_macos(attrs: &FileAttributes) -> MacOsStat {
     let has_resource_fork = attrs.streams.iter().any(|s| {
         s.name == NamedStream::RESOURCE_FORK || s.name == NamedStream::RESOURCE_FORK_LEGACY
@@ -49,6 +53,7 @@ pub fn to_macos(attrs: &FileAttributes) -> MacOsStat {
     }
 }
 
+/// Merge macOS setattr. `uf_hidden` can set DOS hidden; it never clears DOS hidden.
 pub fn merge_from_macos(attrs: &mut FileAttributes, patch: &MacOsSetAttr, now: Timespec) {
     if let Some(mode) = patch.mode {
         attrs.mode = mode & 0o7777;

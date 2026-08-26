@@ -1,5 +1,7 @@
 # Phase 0 — Foundation
 
+Onboarding for the code itself is in [maintainer.md](maintainer.md). This page is the Phase 0 package list and durability contract.
+
 ## Packages
 
 | Package | Kind | Path |
@@ -8,8 +10,10 @@
 | `simulation_harness` | Rust library | `libs/rust/simulation_harness` |
 | `persistent_object_store` | Rust library | `libs/rust/persistent_object_store` |
 | `temporal_core` | Rust library | `libs/rust/temporal_core` |
+| `fuse_facade` | Rust library | `libs/rust/fuse_facade` |
 | `simulation_harness` | Elixir library | `libs/elixir/simulation_harness` |
 | `sim_runner` | Elixir app | `apps/sim_runner` |
+| `arkfs` | Rust app | `apps/arkfs` |
 
 ## Safe-write contract
 

@@ -1,3 +1,4 @@
+# CAS + safe-write. FUSE single-node must not create replica dirs; see crate docs.
 [package]
 name = "persistent_object_store"
 version.workspace = true

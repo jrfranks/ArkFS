@@ -1,0 +1,23 @@
+# Linux FUSE adapter. `fuser` features come from the workspace (abi-7-31).
+# Live tests: tests/fuse_drive.rs (skip on CI). Semantics: temporal_core.
+[package]
+name = "fuse_facade"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "ArkFS FUSE adapter: inode/path translation and open-file cache"
+
+[dependencies]
+arkfs_core = { workspace = true }
+temporal_core = { workspace = true }
+persistent_object_store = { workspace = true }
+fuser = { workspace = true }
+libc = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+libc = { workspace = true }
+fuser = { workspace = true }
+
+[lints]
+workspace = true

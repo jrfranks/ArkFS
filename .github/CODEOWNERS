@@ -1,1 +1,2 @@
+# Default review owner for every path. GitHub CODEOWNERS requires a space before @.
 * @jrfranks

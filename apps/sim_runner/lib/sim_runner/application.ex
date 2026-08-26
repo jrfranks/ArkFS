@@ -1,5 +1,8 @@
 defmodule SimRunner.Application do
-  @moduledoc false
+  @moduledoc """
+  OTP application for `sim_runner`. Empty supervisor: this app is a CLI, not a
+  long-running service. Mix still requires `mod:` in `mix.exs`.
+  """
   use Application
 
   @impl true

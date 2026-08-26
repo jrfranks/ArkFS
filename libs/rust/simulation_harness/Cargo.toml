@@ -1,3 +1,4 @@
+# Clock / delay / chaos primitives for Rust tests. Not the object store.
 [package]
 name = "simulation_harness"
 version.workspace = true

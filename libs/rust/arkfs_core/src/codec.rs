@@ -2,6 +2,22 @@
 //!
 //! Attribute bodies are checksummed with BLAKE3 (trailer). Callers that need a
 //! content id hash the whole encoded buffer with [`crate::ObjectId::from_bytes`].
+//!
+//! # Format (`ARKA1`)
+//!
+//! ```text
+//! magic "ARKA1\n" | fields in encode_attr_body order | 32-byte BLAKE3(body)
+//! ```
+//!
+//! Integers are little-endian. `bytes`/`str` are `u32 length` then payload.
+//! Options are tag `0` (none) or `1` then value. Decode fails closed on bad
+//! magic, truncated input, unknown tags, non-UTF-8 strings, or trailer mismatch.
+//!
+//! [`Writer`] / [`Reader`] are also used by `temporal_core::index` (`ARKIDX2`).
+//! If you change a helper, both attr records and the index must still round-trip.
+//!
+//! This is **not** serde/JSON. The types derive Serialize for tests and
+//! harness snapshots; on-disk truth is this codec.
 
 use crate::attributes::{
     AceAccess, AceFlags, AceType, AclEntry, DosFlags, FileAttributes, FileType, MacOsFlags,
@@ -11,6 +27,7 @@ use crate::error::ArkError;
 
 pub const ATTR_MAGIC: &[u8] = b"ARKA1\n";
 
+/// Growing little-endian buffer. Prefer the typed `u32`/`str` helpers over `raw`.
 pub struct Writer {
     buf: Vec<u8>,
 }
@@ -129,6 +146,7 @@ impl Default for Writer {
     }
 }
 
+/// Cursor over an encoded buffer. `finish` errors if any bytes remain.
 pub struct Reader<'a> {
     data: &'a [u8],
     pos: usize,

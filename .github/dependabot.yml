@@ -1,3 +1,5 @@
+# Weekly Cargo + Actions bumps. Review blake3 / fuser / thiserror carefully:
+# fuser ABI features (abi-7-31) are required for fallocate/lseek.
 version: 2
 updates:
   - package-ecosystem: cargo

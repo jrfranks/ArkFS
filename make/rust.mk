@@ -1,4 +1,6 @@
 # Rust library targets (Cargo workspace is a convenience; Make remains the organizer).
+# `test-rust` is `cargo test --workspace` — includes fuse_facade unit/conformance
+# tests that do not need /dev/fuse. Live kernel tests skip unless FUSE is present.
 
 .PHONY: build-rust test-rust fmt-rust clean-rust
 

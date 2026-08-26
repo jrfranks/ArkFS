@@ -5,6 +5,10 @@ defmodule SimRunner do
   Catalog entries only assert harness behavior this process can actually run
   (clock, delay, chaos log, history oracle). Store and temporal guarantees are
   covered by `cargo test` on the Rust libraries.
+
+  Add a scenario: put a name in `@scenarios`, a `scenario_def/1` clause, and an
+  `oracle/3` clause. `mix test` in this app and `sim_runner` escript both use
+  `run_all/0`.
   """
 
   alias SimulationHarness.Scenario

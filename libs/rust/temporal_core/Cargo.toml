@@ -1,3 +1,4 @@
+# POSIX tree + version history. Durability is PersistentObjectStore only.
 [package]
 name = "temporal_core"
 version.workspace = true

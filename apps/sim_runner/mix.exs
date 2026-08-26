@@ -1,3 +1,5 @@
+# Independent Mix app that *includes* libs/elixir/simulation_harness via path dep.
+# Make is still the organizer; do not add an umbrella.
 defmodule SimRunner.MixProject do
   use Mix.Project
 

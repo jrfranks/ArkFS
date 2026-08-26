@@ -1,6 +1,11 @@
 defmodule SimulationHarness.Scenario do
   @moduledoc """
   Scenario definition and runtime state for SimulationHarness.
+
+  `nodes` are `%{id: String.t(), body: :earth | :moon | :mars}`. `clock_rate`
+  of `1.0` means 1 ms of virtual wall time per `simulate_environment` step
+  (1_000_000 ns). `init_state/1` is the blank runtime map tests thread through
+  chaos helpers.
   """
 
   @enforce_keys [:name, :nodes]

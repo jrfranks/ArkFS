@@ -1,0 +1,10 @@
+# Runnable FUSE CLI. Library crate is argv-only so tests do not need /dev/fuse.
+[package]
+name = "arkfs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "ArkFS single-node FUSE mount"
+
+[dependencies]
+fuse_facade = { workspace = true }

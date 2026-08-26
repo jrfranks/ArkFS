@@ -1,5 +1,8 @@
 # ArkFS Canonical File Attributes
 
+Onboarding: [maintainer.md](maintainer.md) (“How to add a FileAttributes field”).
+Code: `libs/rust/arkfs_core/src/attributes.rs` and `attr_map/`.
+
 ArkFS stores a single **canonical** `FileAttributes` record per file version (cactus-stack snapshot). Protocol facades (**FUSE, NFS v3/v4, SMB 3, WebDAV, macOS**) are pure projections via `arkfs_core::attr_map`. No facade is source of truth.
 
 ## Lossless update rules

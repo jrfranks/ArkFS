@@ -1,3 +1,6 @@
+# Minimal GitHub bar. Must stay runnable on ubuntu-latest without /dev/fuse,
+# Kani, Miri, or llvm-cov. Full proofs run locally via `make precommit`.
+# See docs/maintainer.md ("How to build and test").
 name: CI
 
 on:
@@ -10,14 +13,14 @@ permissions:
 
 jobs:
   ci:
-    name: make ci
+    name: make ci (minimal)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          components: rustfmt
 
       - uses: Swatinem/rust-cache@v2
 
@@ -26,5 +29,5 @@ jobs:
           elixir-version: "1.16"
           otp-version: "26"
 
-      - name: Run Make CI
+      - name: Minimal tests (no proofs)
         run: make ci

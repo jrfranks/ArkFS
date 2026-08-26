@@ -1,10 +1,15 @@
+# Cargo workspace is a convenience for `cargo test --workspace`.
+# Make (root Makefile) is the monorepo organizer; there is no Mix umbrella.
+# Member roles: see docs/maintainer.md.
 [workspace]
 resolver = "2"
 members = [
-    "libs/rust/arkfs_core",
-    "libs/rust/simulation_harness",
-    "libs/rust/persistent_object_store",
-    "libs/rust/temporal_core",
+    "libs/rust/arkfs_core",                 # types, codec, paths, quorum, attr_map
+    "libs/rust/simulation_harness",         # deterministic clock / delay / chaos
+    "libs/rust/persistent_object_store",    # CAS + safe-write + replication trait
+    "libs/rust/temporal_core",              # versioned POSIX tree (cactus index)
+    "libs/rust/fuse_facade",                # Linux FUSE adapter over TemporalCore
+    "apps/arkfs",                           # `arkfs mount|umount` CLI
 ]
 
 [workspace.package]
@@ -17,7 +22,15 @@ arkfs_core = { path = "libs/rust/arkfs_core" }
 simulation_harness = { path = "libs/rust/simulation_harness" }
 persistent_object_store = { path = "libs/rust/persistent_object_store" }
 temporal_core = { path = "libs/rust/temporal_core" }
+fuse_facade = { path = "libs/rust/fuse_facade" }
 blake3 = "1.5"
+fuser = { version = "0.15", default-features = false, features = ["abi-7-31"] }
+libc = "0.2"
 serde = { version = "1.0", features = ["derive"] }
 thiserror = "2.0"
 tempfile = "3.14"
+
+# Kani proofs live under `#[cfg(kani)]`. Teach rustc that `kani` is an expected cfg
+# so `cargo test` does not warn about unexpected_cfgs.
+[workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }

@@ -1,13 +1,19 @@
 //! Simulation harness primitives for ArkFS library tests.
 //!
 //! Deterministic clock, Earth/Moon/Mars delay model, bit-flip and node-loss chaos.
+//!
+//! This crate does **not** implement the object store or temporal index. It
+//! records *intent* (advance time, inject a flip, mark a node lost) so tests
+//! can apply those effects to a real `persistent_object_store` later.
+//! The Elixir package of the same name is the scenario DSL / oracle; keep
+//! the two models aligned (Earth/Moon/Mars, clock_rate, mars_delay_ms).
 
 use arkfs_core::Timestamp;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-/// Logical body for delay presets.
+/// Logical body for delay presets (one-way ms in [`default_delay_ms`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Body {
     Earth,
@@ -25,7 +31,7 @@ pub fn default_delay_ms(a: Body, b: Body) -> u64 {
     }
 }
 
-/// Deterministic virtual clock shared by a scenario.
+/// Deterministic virtual clock shared by a scenario (mutex so tests can clone it).
 #[derive(Debug, Clone)]
 pub struct VirtualClock {
     inner: Arc<Mutex<ClockState>>,
@@ -232,7 +238,7 @@ impl SimulationEnv {
     }
 }
 
-/// Flip one bit in a byte buffer (for integrity tests).
+/// Flip one bit in a byte buffer (for integrity tests). No-op on empty `buf`.
 pub fn flip_bit_in_buffer(buf: &mut [u8], bit_index: usize) {
     if buf.is_empty() {
         return;

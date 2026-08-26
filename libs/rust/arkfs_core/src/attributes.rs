@@ -1,9 +1,17 @@
 //! Canonical file attribute superset for FUSE, NFS, SMB 3, WebDAV, and macOS.
+//!
+//! [`FileAttributes`] is stored as one CAS object per version (`codec::encode_attrs`).
+//! Protocol structs in [`crate::attr_map`] are **views**. Adding a field means
+//! defaulting it, encoding/decoding it, merging with `Option` so unset means
+//! leave-alone, and updating `docs/attributes.md`.
+//!
+//! `file_id == 0` means “not yet assigned”. TemporalCore allocates on first
+//! create. Never publish inode 0 to FUSE (the kernel treats nodeid 0 as ENOENT).
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-/// Nanosecond-resolution wall time used in protocol-facing fields.
+/// Nanosecond-resolution wall time used in protocol-facing fields (not logical time).
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Hash, Serialize, Deserialize,
 )]
@@ -31,6 +39,8 @@ impl Timespec {
     }
 }
 
+/// File kind stored on the canonical record. FUSE maps these in `fuse_kind`.
+/// `Reparse` is SMB-style; FUSE currently projects it as a regular file.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum FileType {
     #[default]
@@ -177,14 +187,14 @@ pub enum SizePolicy {
 /// Canonical attribute record — single source of truth for all protocol facades.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileAttributes {
-    // Identity
+    /// Inode-like identity. FUSE root is forced to 1. 0 = not yet allocated.
     pub file_id: u64,
+    /// NFS/FUSE generation. Currently unused (always 0) but persisted.
     pub generation: u64,
 
-    // Type
     pub file_type: FileType,
 
-    // POSIX
+    /// Permission bits only (`0o7777`); type bits are derived from `file_type`.
     pub mode: u32,
     pub nlink: u32,
     pub uid: u32,
@@ -279,6 +289,7 @@ impl Default for FileAttributes {
 }
 
 impl FileAttributes {
+    /// Regular file: `nlink = 1`, primary `::$DATA` stream, DOS archive bit.
     pub fn new_file(file_id: u64, mode: u32) -> Self {
         let mut a = FileAttributes {
             file_id,
@@ -290,6 +301,7 @@ impl FileAttributes {
         a
     }
 
+    /// Directory: `nlink = 2`, no streams (children live in the path index).
     pub fn new_dir(file_id: u64, mode: u32) -> Self {
         FileAttributes {
             file_id,
@@ -322,6 +334,7 @@ impl FileAttributes {
             .find(|s| s.name == NamedStream::PRIMARY)
     }
 
+    /// Keep `logical_size` and the primary stream size in sync.
     pub fn set_logical_size(&mut self, size: u64, policy: SizePolicy) {
         self.logical_size = size;
         if let Some(s) = self.primary_stream_mut() {
@@ -332,6 +345,7 @@ impl FileAttributes {
         }
     }
 
+    /// Apply a partial POSIX setattr. Unset `Option`s are left unchanged.
     pub fn apply_posix(&mut self, patch: &PosixPatch, now: Timespec, size: SizePolicy) {
         if let Some(mode) = patch.mode {
             self.mode = mode & 0o7777;
@@ -359,6 +373,7 @@ impl FileAttributes {
         }
     }
 
+    /// BLAKE3 of `encode_attr_body` (same bytes as the on-disk trailer).
     pub fn compute_checksum(&self) -> [u8; 32] {
         *blake3::hash(&crate::codec::encode_attr_body(self)).as_bytes()
     }

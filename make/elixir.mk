@@ -1,4 +1,6 @@
 # Each Elixir package is an independent Mix project. No umbrella.
+# ELIXIR_APPS includes apps/arkfs (Rust) which has no mix.exs; the `if [ -f mix.exs ]`
+# guard skips it. Harness tests bookkeeping only — CAS/temporal live in cargo test.
 
 ELIXIR_LIBS := $(wildcard $(ROOT)/libs/elixir/*)
 ELIXIR_APPS := $(wildcard $(ROOT)/apps/*)

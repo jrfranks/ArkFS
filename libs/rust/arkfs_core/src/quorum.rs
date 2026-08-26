@@ -1,3 +1,12 @@
+//! How many durable copies count as “safe” for [`persistent_object_store`].
+//!
+//! The store always counts the **local** write as one ack. `always_on` passed
+//! into these methods is reachable copies **including local**. Isolated
+//! single-node (zero remotes) therefore has `always_on == 1`.
+//!
+//! `OwnerOnly` is the FUSE default. `Quorum(n)` with `n > 1` and no remotes
+//! must fail closed — do not lower `n` silently.
+
 use serde::{Deserialize, Serialize};
 
 /// Replication / durability policy for safe-write.
@@ -21,6 +30,7 @@ impl QuorumPolicy {
         }
     }
 
+    /// `total_acks` is local (1) plus remote `replicate_*` return value.
     pub fn is_satisfied(self, total_acks: u32, always_on: u32) -> bool {
         total_acks >= self.required_acks(always_on)
     }
