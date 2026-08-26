@@ -36,7 +36,7 @@ prove-tools-strict:
 		exit 1; \
 	}
 	@echo "==> kani (fuse_facade io_buf + xattr; PathKey is Miri)"
-	cd $(ROOT) && cargo kani -p fuse_facade --default-unwind 32 \
+	cd $(ROOT) && cargo kani -p fuse_facade --default-unwind 32 --output-format terse \
 		--harness write_then_read_returns_payload \
 		--harness negative_offset_reads_from_zero \
 		--harness range_iff_too_small

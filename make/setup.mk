@@ -9,6 +9,10 @@ setup: setup-hooks setup-tools
 setup-hooks:
 	@if [ -d "$(ROOT)/.git" ] || [ -f "$(ROOT)/.git" ]; then \
 		git -C "$(ROOT)" config core.hooksPath .githooks; \
+		if [ -z "$$(git -C "$(ROOT)" config --local --get core.sshCommand)" ]; then \
+			git -C "$(ROOT)" config --local core.sshCommand \
+				'ssh -o ServerAliveInterval=5 -o ServerAliveCountMax=60'; \
+		fi; \
 		echo "git hooksPath -> .githooks"; \
 	fi
 

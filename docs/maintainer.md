@@ -241,7 +241,7 @@ Every Rust and Elixir test appends NDJSON to `target/arkfs-test-review/events.nd
 `ARKFS_TEST_REVIEW=0`. Off under Miri/Kani. Use this file for later automated
 review of what ran and what was checked.
 
-`make build` / `make test` / `make all` call `setup-hooks` so the first Make target after clone sets `core.hooksPath=.githooks`. Until that runs, `git push` has no pre-push hook — run `make test` or `make setup` once. There is no `pre-commit` hook: **commits are not gated**.
+`make build` / `make test` / `make all` call `setup-hooks` so the first Make target after clone sets `core.hooksPath=.githooks`. Until that runs, `git push` has no pre-push hook — run `make test` or `make setup` once. There is no `pre-commit` hook: **commits are not gated**. If `core.sshCommand` is unset, `setup-hooks` also sets SSH keepalives (`ServerAliveInterval=5`) so the remote does not drop an idle connection while pre-push runs Kani, Miri, and llvm-cov.
 
 `scripts/setup-tools.sh` is the installer. `.githooks/post-checkout` and `post-merge` call it, so **checkout and pull keep tools installed** once hooksPath is set. `CI` or `ARKFS_SKIP_SETUP=1` skips it. `rust-toolchain.toml` makes rustup fetch stable + rustfmt/clippy/llvm-tools on the first `cargo` in the tree. `make prepush` does **not** re-run the installer.
 
