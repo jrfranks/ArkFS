@@ -9,7 +9,8 @@ defmodule SimRunner.MixProject do
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       escript: [main_module: SimRunner.CLI],
-      description: "ArkFS app: runs SimulationHarness scenarios (includes harness library)"
+      description: "ArkFS app: runs SimulationHarness scenarios (includes harness library)",
+      package: [licenses: ["MIT"]]
     ]
   end
 

@@ -23,6 +23,8 @@ make build
 make ci
 ```
 
+GitHub Actions runs `make ci` on push and pull request. See [`.github/CONTRIBUTING.md`](.github/CONTRIBUTING.md).
+
 ## Phase 0 libraries
 
 | Library | Role |
@@ -42,4 +44,4 @@ Canonical metadata is a superset of protocol needs. Facades map via `arkfs_core:
 
 ## License
 
-UNLICENSED — all original work.
+[MIT](LICENSE) — Copyright (c) 2026 jrfranks.

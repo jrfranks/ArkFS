@@ -1,0 +1,20 @@
+name: Feature request
+description: Propose a change that fits the spec
+title: "[feat] "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What should exist that does not exist today?
+    validations:
+      required: true
+
+  - type: textarea
+    id: spec
+    attributes:
+      label: Spec / phase
+      description: Point at SPEC.md or a Phase 0–5 module. Facades must not become source of truth.
+    validations:
+      required: true

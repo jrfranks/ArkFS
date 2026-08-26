@@ -1,0 +1,42 @@
+name: Bug report
+description: Something is broken or incorrect
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: dropdown
+    id: package
+    attributes:
+      label: Package
+      options:
+        - arkfs_core
+        - persistent_object_store
+        - temporal_core
+        - simulation_harness (Rust)
+        - simulation_harness (Elixir)
+        - sim_runner
+        - Make / CI
+        - unspecified
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: Commands, paths, and a minimal snippet if possible.
+    validations:
+      required: true

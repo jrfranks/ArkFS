@@ -8,7 +8,7 @@
 - Elixir: high-level orchestration, policies, UI, ClusterManager, IntelligentMovement.  
 - Rust: all performance-critical paths and NIFs (TemporalCore, PersistentObjectStore, InternalChannel, NodeRuntime).  
 
-**IP**: All original work. Patent novel combinations (cactus-stack + intelligent interplanetary movement + safe-write object store).
+**IP**: MIT License (see [LICENSE](LICENSE)). Patent novel combinations (cactus-stack + intelligent interplanetary movement + safe-write object store).
 
 **Development Mandate** (non-negotiable)  
 - 100% custom code.  

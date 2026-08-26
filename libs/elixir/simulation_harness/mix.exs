@@ -8,7 +8,8 @@ defmodule SimulationHarness.MixProject do
       elixir: "~> 1.16",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
-      description: "ArkFS simulation harness library (scenario DSL + oracle hooks)"
+      description: "ArkFS simulation harness library (scenario DSL + oracle hooks)",
+      package: [licenses: ["MIT"]]
     ]
   end
 
