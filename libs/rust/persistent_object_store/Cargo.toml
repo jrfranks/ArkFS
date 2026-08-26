@@ -11,3 +11,4 @@ arkfs_core = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+arkfs_test_review = { workspace = true }

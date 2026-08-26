@@ -17,11 +17,15 @@ pub enum Command {
     Umount {
         mountpoint: PathBuf,
     },
+    /// Scan CAS objects and re-hash (`PersistentObjectStore::verify_integrity`).
+    Fsck {
+        data: PathBuf,
+    },
 }
 
 /// Stdout for `--help`; also appended to parse errors so users see the grammar.
 pub fn usage() -> &'static str {
-    "usage:\n  arkfs mount --data DIR [--as-of LOGICAL] MOUNTPOINT\n  arkfs umount MOUNTPOINT\n  arkfs --help"
+    "usage:\n  arkfs mount --data DIR [--as-of LOGICAL] MOUNTPOINT\n  arkfs umount MOUNTPOINT\n  arkfs fsck --data DIR\n  arkfs --help"
 }
 
 /// Parse argv **without** argv[0]. Never mounts or unmounts.
@@ -38,11 +42,13 @@ where
         "-h" | "--help" | "help" => Ok(Command::Help),
         "mount" => parse_mount(&args[1..]),
         "umount" | "unmount" => parse_umount(&args[1..]),
+        "fsck" => parse_fsck(&args[1..]),
         other if other.starts_with('-') => Err(format!("unknown flag {other}\n{}", usage())),
         other => Err(format!("unknown command {other}\n{}", usage())),
     }
 }
 
+/// Parse `mount --data DIR [--as-of N] MOUNTPOINT`.
 fn parse_mount(args: &[String]) -> Result<Command, String> {
     let mut data: Option<PathBuf> = None;
     let mut as_of: Option<u64> = None;
@@ -87,6 +93,7 @@ fn parse_mount(args: &[String]) -> Result<Command, String> {
     })
 }
 
+/// Parse `umount|unmount MOUNTPOINT`.
 fn parse_umount(args: &[String]) -> Result<Command, String> {
     if args.first().map(String::as_str) == Some("-h")
         || args.first().map(String::as_str) == Some("--help")
@@ -101,6 +108,31 @@ fn parse_umount(args: &[String]) -> Result<Command, String> {
     })
 }
 
+/// Parse `fsck --data DIR`.
+fn parse_fsck(args: &[String]) -> Result<Command, String> {
+    let mut data: Option<PathBuf> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-h" | "--help" => return Ok(Command::Help),
+            "--data" => {
+                i += 1;
+                let p = args.get(i).ok_or("--data requires a path")?;
+                data = Some(PathBuf::from(p));
+            }
+            flag if flag.starts_with('-') => {
+                return Err(format!("unknown flag {flag}\n{}", usage()));
+            }
+            other => {
+                return Err(format!("unexpected argument {other}\n{}", usage()));
+            }
+        }
+        i += 1;
+    }
+    let data = data.ok_or_else(|| format!("--data DIR is required\n{}", usage()))?;
+    Ok(Command::Fsck { data })
+}
+
 /// Arguments for `fusermount3` / `fusermount` (`-u <mountpoint>`).
 pub fn fusermount_argv(mountpoint: &str) -> Vec<String> {
     vec!["-u".into(), mountpoint.into()]
@@ -109,17 +141,25 @@ pub fn fusermount_argv(mountpoint: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[allow(unused_imports)]
+    use arkfs_test_review::{
+        review_assert as assert, review_eq as assert_eq, review_ne as assert_ne,
+    };
 
+    /// -h / --help / help all parse as Help.
     #[test]
     fn help_flags() {
+        let _g = arkfs_test_review::guard();
         assert_eq!(parse(["--help"]).unwrap(), Command::Help);
         assert_eq!(parse(["-h"]).unwrap(), Command::Help);
         assert_eq!(parse(["help"]).unwrap(), Command::Help);
         assert_eq!(parse(["mount", "--help"]).unwrap(), Command::Help);
     }
 
+    /// mount without --data or mountpoint is an error naming the flag.
     #[test]
     fn mount_requires_data_and_mountpoint() {
+        let _g = arkfs_test_review::guard();
         assert!(parse(["mount"]).unwrap_err().contains("--data"));
         assert!(parse(["mount", "--data"]).unwrap_err().contains("--data"));
         assert!(parse(["mount", "--data", "/d"])
@@ -128,8 +168,10 @@ mod tests {
         assert!(parse(["mount", "/mnt"]).unwrap_err().contains("--data"));
     }
 
+    /// --as-of is parsed; unknown flags and extra args fail.
     #[test]
     fn mount_as_of_and_unknown() {
+        let _g = arkfs_test_review::guard();
         let c = parse(["mount", "--data", "/d", "--as-of", "3", "/m"]).unwrap();
         assert_eq!(
             c,
@@ -153,8 +195,10 @@ mod tests {
         assert!(parse(Vec::<String>::new()).unwrap_err().contains("usage"));
     }
 
+    /// umount/unmount aliases; arity must be 1.
     #[test]
     fn umount_aliases_and_arity() {
+        let _g = arkfs_test_review::guard();
         assert_eq!(
             parse(["umount", "/m"]).unwrap(),
             Command::Umount {
@@ -172,5 +216,21 @@ mod tests {
             .unwrap_err()
             .contains("single"));
         assert_eq!(fusermount_argv("/m"), vec!["-u", "/m"]);
+    }
+
+    /// fsck --data DIR; missing --data fails.
+    #[test]
+    fn fsck_requires_data() {
+        let _g = arkfs_test_review::guard();
+        assert_eq!(
+            parse(["fsck", "--data", "/d"]).unwrap(),
+            Command::Fsck {
+                data: PathBuf::from("/d")
+            }
+        );
+        assert!(parse(["fsck"]).unwrap_err().contains("--data"));
+        assert!(parse(["fsck", "--quiet"])
+            .unwrap_err()
+            .contains("unknown flag"));
     }
 }

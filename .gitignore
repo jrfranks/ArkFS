@@ -1,4 +1,5 @@
 /target/
+.arkfs-setup.stamp
 **/*.rs.bk
 _build/
 deps/

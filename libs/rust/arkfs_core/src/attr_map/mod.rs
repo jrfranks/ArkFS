@@ -26,7 +26,12 @@ pub use webdav::{merge_from_webdav, to_webdav_props, WebDavProperties, WebDavSet
 mod tests {
     use super::*;
     use crate::attributes::{DosFlags, FileAttributes, MacOsFlags, NamedStream, Timespec};
+    #[allow(unused_imports)]
+    use arkfs_test_review::{
+        review_assert as assert, review_eq as assert_eq, review_ne as assert_ne,
+    };
 
+    /// Shared fixture for projection/merge tests.
     fn rich_attrs() -> FileAttributes {
         let mut a = FileAttributes::new_file(42, 0o640);
         a.uid = 1000;
@@ -72,8 +77,10 @@ mod tests {
         a
     }
 
+    /// FUSE setattr must not clear DOS/macOS flags.
     #[test]
     fn fuse_partial_setattr_preserves_smb_and_macos() {
+        let _g = arkfs_test_review::guard();
         let mut attrs = rich_attrs();
         let before_dos = attrs.dos;
         let before_macos = attrs.macos;
@@ -118,8 +125,10 @@ mod tests {
         assert_eq!(attrs.change_attr, 8);
     }
 
+    /// SMB to_* then merge_from_* is identity on expressed fields.
     #[test]
     fn smb_round_trip_identity_for_expressed_fields() {
+        let _g = arkfs_test_review::guard();
         let attrs = rich_attrs();
         let info = to_smb3(&attrs);
         let mut back = FileAttributes::default();
@@ -157,8 +166,10 @@ mod tests {
         );
     }
 
+    /// NFSv4 projection/merge keeps mode/owner/times.
     #[test]
     fn nfs4_round_trip_mode_owner_times() {
+        let _g = arkfs_test_review::guard();
         let attrs = rich_attrs();
         let fattr = to_nfs4(&attrs);
         let mut back = FileAttributes::new_file(1, 0o777);
@@ -184,8 +195,10 @@ mod tests {
         assert!(back.dos.hidden);
     }
 
+    /// WebDAV merge must not drop named streams.
     #[test]
     fn webdav_merge_preserves_streams() {
+        let _g = arkfs_test_review::guard();
         let mut attrs = rich_attrs();
         let streams = attrs.streams.clone();
         merge_from_webdav(
@@ -210,8 +223,10 @@ mod tests {
         assert!(attrs.dos.hidden);
     }
 
+    /// macOS merge keeps DOS flags and WebDAV dead props.
     #[test]
     fn macos_merge_preserves_dos_and_dead_props() {
+        let _g = arkfs_test_review::guard();
         let mut attrs = rich_attrs();
         let dead = attrs.dead_props.clone();
         merge_from_macos(
@@ -242,8 +257,10 @@ mod tests {
         assert!(attrs.xattrs.contains_key("user.comment"));
     }
 
+    /// SMB SetInfo must not assign a new file_id.
     #[test]
     fn smb_setinfo_does_not_rewrite_file_id() {
+        let _g = arkfs_test_review::guard();
         let mut attrs = FileAttributes::new_file(42, 0o644);
         merge_from_smb3(
             &mut attrs,
@@ -257,8 +274,10 @@ mod tests {
         assert_eq!(attrs.logical_size, 8);
     }
 
+    /// to_fuse copies size/nlink/mode and S_IFMT.
     #[test]
     fn fuse_stat_projection() {
+        let _g = arkfs_test_review::guard();
         let attrs = rich_attrs();
         let st = to_fuse(&attrs);
         assert_eq!(st.ino, 42);
@@ -268,8 +287,10 @@ mod tests {
         assert_eq!(st.nlink, 1);
     }
 
+    /// to_webdav exposes live/dead properties.
     #[test]
     fn webdav_props_projection() {
+        let _g = arkfs_test_review::guard();
         let attrs = rich_attrs();
         let p = to_webdav_props(&attrs);
         assert_eq!(p.getcontentlength, 1024);

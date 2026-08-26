@@ -38,6 +38,7 @@ pub struct Nfs4SetAttr {
 }
 
 impl Nfs4SetAttr {
+    /// Fill NFSv4 POSIX-shaped fields from canonical attrs.
     fn posix(&self) -> PosixPatch {
         PosixPatch {
             mode: self.mode,

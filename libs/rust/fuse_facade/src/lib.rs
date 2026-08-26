@@ -11,6 +11,7 @@
 //! | `io_buf` | Offset arithmetic for read/write (Kani-checked) |
 //! | `xattr` | size=0 length protocol |
 //! | `disk` | Inspect CAS after a live mount (test scaffold) |
+//! | `posix_lock` | In-process fcntl record locks (GETLK / SETLK / SETLKW) |
 //!
 //! [`IMPLEMENTED_FUSE_OPS`] is the reachability contract. `tests/conformance.rs`
 //! greps `fuse.rs` and this table. GitHub runs those tests **without** `/dev/fuse`.
@@ -23,6 +24,7 @@ mod disk;
 mod err;
 mod fuse;
 mod io_buf;
+mod posix_lock;
 mod session;
 mod xattr;
 
@@ -30,7 +32,9 @@ pub use disk::{inspect, DiskView, LiveNode};
 pub use err::{all_errno_pairs, to_errno};
 pub use fuse::{fuse_name, mount, spawn, FuseFs};
 pub use io_buf::{apply_write, read_slice};
-pub use session::{errno, fuse_kind, handle_to_attr, time_or_now_to_timespec, ArkSession, TTL};
+pub use session::{
+    errno, fuse_kind, handle_to_attr, time_or_now_to_timespec, ArkSession, FsStat, TTL,
+};
 pub use xattr::{encode_list, sized, SizedBytes};
 
 /// FUSE low-level ops this facade implements (reachability contract).
@@ -60,6 +64,7 @@ pub const IMPLEMENTED_FUSE_OPS: &[&str] = &[
     "fsync",
     "opendir",
     "readdir",
+    "readdirplus",
     "releasedir",
     "fsyncdir",
     "statfs",
@@ -76,6 +81,7 @@ pub const IMPLEMENTED_FUSE_OPS: &[&str] = &[
     "poll",
     "fallocate",
     "lseek",
+    "copy_file_range",
     "mount",
     "spawn",
 ];

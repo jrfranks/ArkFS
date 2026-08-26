@@ -10,6 +10,7 @@ members = [
     "libs/rust/temporal_core",              # versioned POSIX tree (cactus index)
     "libs/rust/fuse_facade",                # Linux FUSE adapter over TemporalCore
     "apps/arkfs",                           # `arkfs mount|umount` CLI
+    "libs/rust/test_review",                # test NDJSON logs (dev-dependency only)
 ]
 
 [workspace.package]
@@ -23,6 +24,7 @@ simulation_harness = { path = "libs/rust/simulation_harness" }
 persistent_object_store = { path = "libs/rust/persistent_object_store" }
 temporal_core = { path = "libs/rust/temporal_core" }
 fuse_facade = { path = "libs/rust/fuse_facade" }
+arkfs_test_review = { path = "libs/rust/test_review" }
 blake3 = "1.5"
 fuser = { version = "0.15", default-features = false, features = ["abi-7-31"] }
 libc = "0.2"

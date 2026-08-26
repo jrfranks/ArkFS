@@ -1,0 +1,5 @@
+# rustup reads this on any cargo/rustc in the repo (including first clone).
+# Nightly Miri and Kani's CBMC toolchain are installed by scripts/setup-tools.sh.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy", "llvm-tools-preview"]

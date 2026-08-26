@@ -4,7 +4,10 @@
 //! “bit flip” from “disk died”). `Conflict` becomes `EPERM`.
 
 use arkfs_core::ArkError;
-use libc::{EEXIST, EINVAL, EIO, EISDIR, ENOENT, ENOSYS, ENOTDIR, ENOTEMPTY, EPERM, EROFS};
+use libc::{
+    EACCES, EAGAIN, EEXIST, EFBIG, EINVAL, EIO, EISDIR, ENAMETOOLONG, ENOENT, ENOSPC, ENOSYS,
+    ENOTDIR, ENOTEMPTY, ENXIO, EPERM, EROFS,
+};
 
 /// Map a library error to the errno the kernel expects on the FUSE reply.
 pub fn to_errno(err: &ArkError) -> i32 {
@@ -18,6 +21,12 @@ pub fn to_errno(err: &ArkError) -> i32 {
         ArkError::InvalidArgument { .. } | ArkError::AttrInvalid { .. } => EINVAL,
         ArkError::Conflict { .. } => EPERM,
         ArkError::NotImplemented { .. } => ENOSYS,
+        ArkError::Busy { .. } => EAGAIN,
+        ArkError::PermissionDenied { .. } => EACCES,
+        ArkError::NoSuchDevice { .. } => ENXIO,
+        ArkError::NameTooLong { .. } => ENAMETOOLONG,
+        ArkError::NoSpace { .. } => ENOSPC,
+        ArkError::FileTooLarge { .. } => EFBIG,
         ArkError::Io {
             kind: std::io::ErrorKind::NotFound,
             ..
@@ -56,22 +65,43 @@ pub fn all_errno_pairs() -> Vec<(ArkError, i32)> {
         (ArkError::not_empty("x"), ENOTEMPTY),
         (ArkError::ReadOnly, EROFS),
         (ArkError::not_implemented("x"), ENOSYS),
+        (ArkError::busy("x"), EAGAIN),
+        (ArkError::permission_denied("x"), EACCES),
+        (ArkError::no_such_device("x"), ENXIO),
+        (ArkError::name_too_long("x"), ENAMETOOLONG),
+        (ArkError::no_space("x"), ENOSPC),
+        (ArkError::file_too_large("x"), EFBIG),
     ]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[allow(unused_imports)]
+    use arkfs_test_review::{
+        review_assert as assert, review_eq as assert_eq, review_ne as assert_ne,
+    };
 
+    /// Spot-check ENOENT / EEXIST / EROFS mapping.
     #[test]
     fn maps_posix_errors() {
+        let _g = arkfs_test_review::guard();
         assert_eq!(to_errno(&ArkError::not_found("/x")), ENOENT);
         assert_eq!(to_errno(&ArkError::already_exists("/x")), EEXIST);
         assert_eq!(to_errno(&ArkError::ReadOnly), EROFS);
+        assert_eq!(to_errno(&ArkError::permission_denied("x")), EACCES);
+        assert_eq!(to_errno(&ArkError::no_such_device("x")), ENXIO);
+        assert_ne!(to_errno(&ArkError::no_such_device("x")), EINVAL);
+        assert_ne!(to_errno(&ArkError::permission_denied("x")), EINVAL);
+        assert_eq!(to_errno(&ArkError::name_too_long("x")), ENAMETOOLONG);
+        assert_eq!(to_errno(&ArkError::no_space("x")), ENOSPC);
+        assert_eq!(to_errno(&ArkError::file_too_large("x")), EFBIG);
     }
 
+    /// Every ArkError variant in all_errno_pairs maps to the listed errno.
     #[test]
     fn errno_table_covers_every_variant() {
+        let _g = arkfs_test_review::guard();
         for (err, want) in all_errno_pairs() {
             assert_eq!(to_errno(&err), want, "{err}");
         }

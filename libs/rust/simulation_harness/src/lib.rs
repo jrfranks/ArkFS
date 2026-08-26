@@ -47,6 +47,7 @@ struct ClockState {
 }
 
 impl VirtualClock {
+    /// Clock at logical 0, rate 1.0.
     pub fn new() -> Self {
         VirtualClock {
             inner: Arc::new(Mutex::new(ClockState {
@@ -57,14 +58,17 @@ impl VirtualClock {
         }
     }
 
+    /// Virtual speed multiplier (0 = freeze).
     pub fn set_rate(&self, rate: f64) {
         self.inner.lock().unwrap().rate = rate.max(0.0);
     }
 
+    /// Virtual nanoseconds since scenario start.
     pub fn now_ns(&self) -> u64 {
         self.inner.lock().unwrap().now_ns
     }
 
+    /// Advance wall by ms*rate and bump logical by 1.
     pub fn advance_ms(&self, ms: u64) {
         let mut g = self.inner.lock().unwrap();
         let delta = ((ms as f64) * 1_000_000.0 * g.rate) as u64;
@@ -72,6 +76,7 @@ impl VirtualClock {
         g.logical = g.logical.saturating_add(1);
     }
 
+    /// Hybrid Timestamp from logical + now_ns.
     pub fn timestamp(&self) -> Timestamp {
         let g = self.inner.lock().unwrap();
         Timestamp::new(g.logical, g.now_ns)
@@ -79,6 +84,7 @@ impl VirtualClock {
 }
 
 impl Default for VirtualClock {
+    /// Same as VirtualClock::new.
     fn default() -> Self {
         Self::new()
     }
@@ -92,6 +98,7 @@ pub struct NetworkSimulator {
 }
 
 impl NetworkSimulator {
+    /// No overrides; delays come from default_delay_ms.
     pub fn new() -> Self {
         NetworkSimulator {
             delays: HashMap::new(),
@@ -99,10 +106,12 @@ impl NetworkSimulator {
         }
     }
 
+    /// Override Earth/Moon ↔ Mars one-way delay.
     pub fn set_mars_delay(&mut self, delay_ms: u64) {
         self.mars_delay_ms = Some(delay_ms);
     }
 
+    /// One-way delay: Mars override, then map, then defaults.
     pub fn delay_ms(&self, from: Body, to: Body) -> u64 {
         if matches!(
             (from, to),
@@ -128,6 +137,7 @@ impl NetworkSimulator {
 }
 
 impl Default for NetworkSimulator {
+    /// Same as NetworkSimulator::new.
     fn default() -> Self {
         Self::new()
     }
@@ -141,26 +151,32 @@ pub struct ChaosInjector {
 }
 
 impl ChaosInjector {
+    /// Empty chaos log.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Record a planned bit-flip (node, block). Not applied here.
     pub fn inject_bit_flip(&mut self, node_id: impl Into<String>, block_id: impl Into<String>) {
         self.bit_flips.push((node_id.into(), block_id.into()));
     }
 
+    /// Record a planned node loss.
     pub fn lose_node(&mut self, node_id: impl Into<String>) {
         self.lost_nodes.push(node_id.into());
     }
 
+    /// True if lose_node was called for this id.
     pub fn is_node_lost(&self, node_id: &str) -> bool {
         self.lost_nodes.iter().any(|n| n == node_id)
     }
 
+    /// Planned flips not yet taken.
     pub fn pending_bit_flips(&self) -> &[(String, String)] {
         &self.bit_flips
     }
 
+    /// Drain planned flips so a store test can apply them.
     pub fn take_bit_flips(&mut self) -> Vec<(String, String)> {
         std::mem::take(&mut self.bit_flips)
     }
@@ -200,6 +216,7 @@ pub struct SimulationEnv {
 }
 
 impl SimulationEnv {
+    /// Build clock/network/chaos from a scenario definition.
     pub fn from_scenario(scenario: Scenario) -> Self {
         let clock = VirtualClock::new();
         clock.set_rate(scenario.clock_rate);
@@ -215,14 +232,17 @@ impl SimulationEnv {
         }
     }
 
+    /// Forward to ChaosInjector.
     pub fn inject_bit_flip(&mut self, node_id: impl Into<String>, block_id: impl Into<String>) {
         self.chaos.inject_bit_flip(node_id, block_id);
     }
 
+    /// Forward to NetworkSimulator.
     pub fn set_mars_delay(&mut self, delay_ms: u64) {
         self.network.set_mars_delay(delay_ms);
     }
 
+    /// Advance the clock `steps` ms; does not touch CAS.
     pub fn simulate_steps(&self, steps: u64) -> SimulationResult {
         for _ in 0..steps {
             self.clock.advance_ms(1);
@@ -251,32 +271,44 @@ pub fn flip_bit_in_buffer(buf: &mut [u8], bit_index: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[allow(unused_imports)]
+    use arkfs_test_review::{
+        review_assert as assert, review_eq as assert_eq, review_ne as assert_ne,
+    };
 
+    /// set_mars_delay changes Earth→Mars from the 240s default.
     #[test]
     fn mars_delay_override() {
+        let _g = arkfs_test_review::guard();
         let mut net = NetworkSimulator::new();
         assert_eq!(net.delay_ms(Body::Earth, Body::Mars), 240_000);
         net.set_mars_delay(500);
         assert_eq!(net.delay_ms(Body::Earth, Body::Mars), 500);
     }
 
+    /// advance_ms(10) at rate 1 is 10ms wall and logical 1.
     #[test]
     fn clock_advances() {
+        let _g = arkfs_test_review::guard();
         let clock = VirtualClock::new();
         clock.advance_ms(10);
         assert_eq!(clock.now_ns(), 10_000_000);
         assert_eq!(clock.timestamp().logical, 1);
     }
 
+    /// Bit 0 of a zero buffer becomes 1.
     #[test]
     fn bit_flip_changes_buffer() {
+        let _g = arkfs_test_review::guard();
         let mut buf = vec![0u8; 4];
         flip_bit_in_buffer(&mut buf, 0);
         assert_eq!(buf[0], 1);
     }
 
+    /// from_scenario + simulate_steps returns ok with advanced logical.
     #[test]
     fn scenario_env_runs() {
+        let _g = arkfs_test_review::guard();
         let sc = Scenario {
             name: "smoke".into(),
             nodes: vec![ScenarioNode {

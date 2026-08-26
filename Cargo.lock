@@ -6,6 +6,7 @@ version = 4
 name = "arkfs"
 version = "0.1.0"
 dependencies = [
+ "arkfs_test_review",
  "fuse_facade",
 ]
 
@@ -13,10 +14,15 @@ dependencies = [
 name = "arkfs_core"
 version = "0.1.0"
 dependencies = [
+ "arkfs_test_review",
  "blake3",
  "serde",
  "thiserror",
 ]
+
+[[package]]
+name = "arkfs_test_review"
+version = "0.1.0"
 
 [[package]]
 name = "arrayref"
@@ -114,6 +120,7 @@ name = "fuse_facade"
 version = "0.1.0"
 dependencies = [
  "arkfs_core",
+ "arkfs_test_review",
  "fuser",
  "libc",
  "persistent_object_store",
@@ -204,6 +211,7 @@ name = "persistent_object_store"
 version = "0.1.0"
 dependencies = [
  "arkfs_core",
+ "arkfs_test_review",
  "tempfile",
 ]
 
@@ -285,6 +293,7 @@ name = "simulation_harness"
 version = "0.1.0"
 dependencies = [
  "arkfs_core",
+ "arkfs_test_review",
  "serde",
 ]
 
@@ -323,6 +332,7 @@ name = "temporal_core"
 version = "0.1.0"
 dependencies = [
  "arkfs_core",
+ "arkfs_test_review",
  "persistent_object_store",
  "tempfile",
 ]

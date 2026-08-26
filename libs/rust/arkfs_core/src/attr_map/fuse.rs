@@ -49,6 +49,7 @@ pub fn merge_from_fuse(attrs: &mut FileAttributes, patch: &FuseSetAttr, now: Tim
     attrs.apply_posix(patch, now, SizePolicy::GrowAllocation);
 }
 
+/// FileType → Unix S_IF* bits or-ed into mode.
 fn type_to_s_ifmt(t: FileType) -> u32 {
     match t {
         FileType::File => 0o100000,

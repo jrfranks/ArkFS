@@ -9,3 +9,6 @@ description = "ArkFS interplanetary simulation: clock, delay, chaos injection"
 [dependencies]
 arkfs_core = { workspace = true }
 serde = { workspace = true }
+
+[dev-dependencies]
+arkfs_test_review = { workspace = true }

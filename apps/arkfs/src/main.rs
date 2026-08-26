@@ -8,6 +8,7 @@ use fuse_facade::ArkSession;
 use std::env;
 use std::process::Command as Proc;
 
+/// Parse argv; Help prints usage, Mount blocks, Umount shells fusermount3.
 fn main() {
     match cli::parse(env::args().skip(1)) {
         Ok(Command::Help) => {
@@ -29,6 +30,12 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        Ok(Command::Fsck { data }) => {
+            if let Err(e) = do_fsck(&data) {
+                eprintln!("arkfs: {e}");
+                std::process::exit(1);
+            }
+        }
         Err(e) => {
             eprintln!("arkfs: {e}");
             std::process::exit(1);
@@ -36,6 +43,7 @@ fn main() {
     }
 }
 
+/// Open isolated store and block in fuse_facade::mount.
 fn do_mount(
     data: std::path::PathBuf,
     as_of: Option<u64>,
@@ -46,7 +54,7 @@ fn do_mount(
         "arkfs: mounting {} (data {}, {})",
         mountpoint.display(),
         data.display(),
-        if session.read_only {
+        if session.is_read_only() {
             "read-only as-of"
         } else {
             "read-write"
@@ -55,6 +63,26 @@ fn do_mount(
     fuse_facade::mount(session, &mountpoint).map_err(|e| e.to_string())
 }
 
+/// Re-hash every CAS object. Exit 1 if any checksum fails.
+fn do_fsck(data: &std::path::Path) -> Result<(), String> {
+    let session = ArkSession::mount_store(data, None).map_err(|e| e.to_string())?;
+    let report = session.verify_integrity().map_err(|e| e.to_string())?;
+    println!(
+        "arkfs fsck: {} objects checked, {} failures",
+        report.objects_checked,
+        report.failures.len()
+    );
+    for f in &report.failures {
+        eprintln!("arkfs fsck: {f}");
+    }
+    if report.ok() {
+        Ok(())
+    } else {
+        Err(format!("{} integrity failure(s)", report.failures.len()))
+    }
+}
+
+/// fusermount3 -u, falling back to fusermount.
 fn do_umount(mountpoint: &std::path::Path) -> Result<(), String> {
     let mp = mountpoint.to_str().ok_or("mountpoint is not UTF-8")?;
     let argv = cli::fusermount_argv(mp);

@@ -18,6 +18,7 @@ libc = { workspace = true }
 tempfile = { workspace = true }
 libc = { workspace = true }
 fuser = { workspace = true }
+arkfs_test_review = { workspace = true }
 
 [lints]
 workspace = true

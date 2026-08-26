@@ -24,14 +24,11 @@
 //!
 //! Do not hold `index` across `store.put`.
 //!
-//! # Inode allocation trap
+//! # Inode allocation
 //!
-//! `file_id` is assigned when the **path key is new**. A tombstone still owns
-//! the key, so unlink+create can publish `file_id = 0`. FUSE treats nodeid 0
-//! as ENOENT. When changing this, treat a trailing tombstone as a new identity.
-//!
-//! Directory `rename` currently copies one path and tombstones the source; it
-//! does **not** rewrite child paths. See `docs/maintainer.md` traps.
+//! `file_id == 0` means unassigned. Allocate whenever the new attrs have
+//! `file_id == 0` (including recreate after a tombstone). Never persist 0.
+//! Directory rename retargets every descendant path in one index persist.
 //!
 //! Onboarding: `docs/maintainer.md`.
 
@@ -41,7 +38,7 @@ use arkfs_core::codec;
 use arkfs_core::{
     ArkError, FileAttributes, FileType, ObjectId, PathKey, QuorumPolicy, SizePolicy, Timestamp,
 };
-use index::{decode_index, encode_index, DurableIndex, PathHistory, VersionRecord};
+use index::{decode_index, encode_index, DurableIndex, VersionRecord};
 use persistent_object_store::PersistentObjectStore;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -53,6 +50,11 @@ pub use index::{
 
 /// Named store pointer to the latest encoded [`PersistedIndex`] object.
 pub const INDEX_ANCHOR: &str = "temporal_index";
+
+/// Linux `renameat2(RENAME_NOREPLACE)` — fail if the destination exists.
+pub const RENAME_NOREPLACE: u32 = 1;
+/// Linux `renameat2(RENAME_EXCHANGE)` — swap the two names (and their trees).
+pub const RENAME_EXCHANGE: u32 = 2;
 
 /// Live tree vs a historical cut.
 ///
@@ -114,10 +116,10 @@ impl TemporalCore {
             Some(id) => decode_index(&store.get(&id)?)?,
             None => DurableIndex {
                 next_file_id: 1,
-                paths: Default::default(),
+                ..Default::default()
             },
         };
-        let clock = max_timestamp(&index);
+        let clock = index.max_timestamp();
         Ok(TemporalCore {
             store,
             index: Mutex::new(index),
@@ -127,32 +129,49 @@ impl TemporalCore {
         })
     }
 
+    /// Latest hybrid-logical timestamp observed or produced by this core.
     pub fn now(&self) -> Timestamp {
         *self.clock.lock().unwrap()
     }
 
+    /// Live-tree lookup. Tombstones are not found.
     pub fn lookup_current(&self, path: &str) -> Result<FileHandle, ArkError> {
         self.lookup(path, View::Live)
     }
 
+    /// Historical lookup: last version with `at <= ts`. A later tombstone does not hide it.
     pub fn lookup_at_timestamp(&self, path: &str, ts: Timestamp) -> Result<FileHandle, ArkError> {
         self.lookup(path, View::AsOf(ts))
     }
 
+    /// Lookup `path` in `view`. Parses the path first (`PathKey::parse`).
     pub fn lookup(&self, path: &str, view: View) -> Result<FileHandle, ArkError> {
         let path = PathKey::parse(path)?;
         self.lookup_key(&path, view)
     }
 
-    /// Resolve FUSE inode → path → handle. Linear scan of the path map.
+    /// Resolve FUSE inode → path → handle.
+    ///
+    /// `View::Live` uses the derived inode map (O(1)). `View::AsOf` still scans
+    /// because historical names are not in that map.
     pub fn lookup_ino(&self, ino: u64, view: View) -> Result<FileHandle, ArkError> {
         let rec_path = {
             let index = self.index.lock().unwrap();
-            find_ino(&index, ino, view).ok_or_else(|| ArkError::not_found(format!("ino {ino}")))?
+            let found = match view {
+                View::Live => index.ino_to_path.get(&ino).cloned(),
+                View::AsOf(_) => index.find_ino(ino, view),
+            };
+            found.ok_or_else(|| ArkError::not_found(format!("ino {ino}")))?
         };
         self.lookup_key(&rec_path, view)
     }
 
+    /// Number of live (non-tombstone) paths. FUSE `statfs` `f_files`.
+    pub fn live_path_count(&self) -> u64 {
+        self.index.lock().unwrap().live_path_count()
+    }
+
+    /// Load file bytes from CAS. `handle.content_id` is the key, not the payload.
     pub fn read_content(&self, handle: &FileHandle) -> Result<Vec<u8>, ArkError> {
         self.store.get(&handle.content_id)
     }
@@ -165,10 +184,21 @@ impl TemporalCore {
             return Err(ArkError::not_a_directory(dir.as_str()));
         }
         let index = self.index.lock().unwrap();
+        if matches!(view, View::Live) {
+            let kids = index.live_children.get(&dir).cloned().unwrap_or_default();
+            return Ok(kids
+                .into_iter()
+                .map(|(name, ino, file_type)| DirEntry {
+                    name,
+                    ino,
+                    file_type,
+                })
+                .collect());
+        }
         let mut out = Vec::new();
         for (path, hist) in &index.paths {
             if let Some(name) = dir.immediate_child(path) {
-                if let Some(rec) = record_in_view(hist, view) {
+                if let Some(rec) = hist.record_in_view(view) {
                     if !rec.tombstone {
                         out.push(DirEntry {
                             name: name.to_string(),
@@ -183,16 +213,26 @@ impl TemporalCore {
         Ok(out)
     }
 
-    /// Create `/` as inode 1 if missing. Idempotent.
+    /// Create `/` as inode 1 if missing, owned by uid/gid 0. Idempotent.
     pub fn ensure_root(&self) -> Result<FileHandle, ArkError> {
+        self.ensure_root_as(0, 0)
+    }
+
+    /// Create `/` as inode 1 owned by `uid`/`gid` if missing. Idempotent.
+    ///
+    /// FUSE uses the mounting process ids so a non-root client can write `/`.
+    pub fn ensure_root_as(&self, uid: u32, gid: u32) -> Result<FileHandle, ArkError> {
         if let Ok(h) = self.lookup_key(&PathKey::root(), View::Live) {
             return Ok(h);
         }
         let at = self.tick();
+        let mut attrs = FileAttributes::new_dir(1, 0o755);
+        attrs.uid = uid;
+        attrs.gid = gid;
         self.commit_branch(BranchDelta {
             path: "/".into(),
             content: Some(Vec::new()),
-            attrs: Some(FileAttributes::new_dir(1, 0o755)),
+            attrs: Some(attrs),
             at,
         })?;
         self.lookup_key(&PathKey::root(), View::Live)
@@ -207,7 +247,7 @@ impl TemporalCore {
         uid: u32,
         gid: u32,
     ) -> Result<FileHandle, ArkError> {
-        let path = self.prepare_create(parent, name, true)?;
+        let path = self.prepare_create(parent, name)?;
         let mut attrs = FileAttributes::new_dir(0, mode & 0o7777);
         attrs.uid = uid;
         attrs.gid = gid;
@@ -230,7 +270,7 @@ impl TemporalCore {
         uid: u32,
         gid: u32,
     ) -> Result<FileHandle, ArkError> {
-        let path = self.prepare_create(parent, name, false)?;
+        let path = self.prepare_create(parent, name)?;
         let mut attrs = FileAttributes::new_file(0, mode & 0o7777);
         attrs.uid = uid;
         attrs.gid = gid;
@@ -253,7 +293,7 @@ impl TemporalCore {
         uid: u32,
         gid: u32,
     ) -> Result<FileHandle, ArkError> {
-        let path = self.prepare_create(parent, name, false)?;
+        let path = self.prepare_create(parent, name)?;
         let mut attrs = FileAttributes::new_file(0, 0o777);
         attrs.file_type = FileType::Symlink;
         attrs.symlink_target = Some(target.into());
@@ -296,16 +336,15 @@ impl TemporalCore {
         self.tombstone(&path)
     }
 
-    /// Copy one path to a new name and tombstone the source.
-    ///
-    /// Directory children are **not** rewritten (known limitation). Rejects
-    /// rename into a descendant. Replacing a live dest tombstones dest first
-    /// (empty-dir / type-match rules like POSIX).
+    /// Move `from` to `to_parent/to_name`. Directories take every descendant
+    /// with them in a single index persist. `flags` are Linux `renameat2`
+    /// bits ([`RENAME_NOREPLACE`], [`RENAME_EXCHANGE`]).
     pub fn rename(
         &self,
         from: &str,
         to_parent: &str,
         to_name: &str,
+        flags: u32,
     ) -> Result<FileHandle, ArkError> {
         let from = PathKey::parse(from)?;
         let src = self.lookup_key(&from, View::Live)?;
@@ -317,12 +356,35 @@ impl TemporalCore {
         if dest == from {
             return Ok(src);
         }
-        if dest.as_str().starts_with(&format!("{}/", from.as_str())) && !from.is_root() {
+        if dest.is_under(&from) {
             return Err(ArkError::invalid_argument(
                 "cannot rename into a descendant",
             ));
         }
+        let exchange = flags & RENAME_EXCHANGE != 0;
+        let noreplace = flags & RENAME_NOREPLACE != 0;
+        if exchange && noreplace {
+            return Err(ArkError::invalid_argument(
+                "RENAME_EXCHANGE and RENAME_NOREPLACE are mutually exclusive",
+            ));
+        }
+        if flags & !(RENAME_NOREPLACE | RENAME_EXCHANGE) != 0 {
+            return Err(ArkError::invalid_argument("unsupported rename flags"));
+        }
+        if exchange {
+            if from.is_under(&dest) {
+                return Err(ArkError::invalid_argument(
+                    "cannot exchange with a descendant",
+                ));
+            }
+            let _existing = self.lookup_key(&dest, View::Live)?;
+            self.exchange_tree(&from, &dest)?;
+            return self.lookup_key(&dest, View::Live);
+        }
         if let Ok(existing) = self.lookup_key(&dest, View::Live) {
+            if noreplace {
+                return Err(ArkError::already_exists(dest.as_str()));
+            }
             if existing.attrs.file_type == FileType::Directory {
                 if src.attrs.file_type != FileType::Directory {
                     return Err(ArkError::is_a_directory(dest.as_str()));
@@ -333,38 +395,111 @@ impl TemporalCore {
             } else if src.attrs.file_type == FileType::Directory {
                 return Err(ArkError::not_a_directory(dest.as_str()));
             }
-            self.tombstone(&dest)?;
         }
-        let content = self.store.get(&src.content_id)?;
-        let at = self.tick();
-        self.commit_branch(BranchDelta {
-            path: dest.as_str().into(),
-            content: Some(content),
-            attrs: Some(src.attrs.clone()),
-            at,
-        })?;
-        self.tombstone(&from)?;
+        self.rename_tree(&from, &dest)?;
         self.lookup_key(&dest, View::Live)
     }
 
+    /// Extra name for a live non-directory. Same `file_id` (hard link).
+    /// Shares the source `content_id` / `attrs_id`; later writes fan out to
+    /// every live name of that inode (see [`replace_content`]).
+    pub fn link(&self, src: &str, to_parent: &str, to_name: &str) -> Result<FileHandle, ArkError> {
+        let src = self.lookup(src, View::Live)?;
+        if src.attrs.file_type == FileType::Directory {
+            return Err(ArkError::is_a_directory(src.path.as_str()));
+        }
+        let dest = self.prepare_create(to_parent, to_name)?;
+        let at = self.tick();
+        let _commit = self.commit.lock().unwrap();
+        let mut snapshot = self.index.lock().unwrap().clone();
+        self.observe(at);
+        if let Some(last) = snapshot.paths.get(&dest).and_then(|h| h.versions.last()) {
+            if !last.tombstone {
+                return Err(ArkError::already_exists(dest.as_str()));
+            }
+            if at <= last.at {
+                return Err(ArkError::conflict("commit timestamp before latest version"));
+            }
+        }
+        let src_rec = snapshot
+            .paths
+            .get(&src.path)
+            .and_then(|h| h.versions.last())
+            .cloned()
+            .ok_or_else(|| ArkError::not_found(src.path.as_str()))?;
+        if src_rec.tombstone {
+            return Err(ArkError::not_found(src.path.as_str()));
+        }
+        let parent = snapshot.version_parent(&dest);
+        snapshot.push(dest.clone(), src_rec.continue_as(at, parent, false));
+        self.persist_index(snapshot)?;
+        self.lookup_key(&dest, View::Live)
+    }
+
+    /// Create a node of any POSIX type (regular, fifo, socket, device).
+    #[allow(clippy::too_many_arguments)]
+    pub fn mknod(
+        &self,
+        parent: &str,
+        name: &str,
+        file_type: FileType,
+        mode: u32,
+        uid: u32,
+        gid: u32,
+        rdev: Option<u64>,
+    ) -> Result<FileHandle, ArkError> {
+        if file_type == FileType::Directory {
+            return self.mkdir(parent, name, mode, uid, gid);
+        }
+        let path = self.prepare_create(parent, name)?;
+        let mut attrs = if file_type == FileType::File {
+            FileAttributes::new_file(0, mode & 0o7777)
+        } else {
+            let mut a = FileAttributes::new_file(0, mode & 0o7777);
+            a.file_type = file_type;
+            a.streams.clear();
+            a.rdev = rdev;
+            a
+        };
+        attrs.uid = uid;
+        attrs.gid = gid;
+        let at = self.tick();
+        self.commit_branch(BranchDelta {
+            path: path.as_str().into(),
+            content: Some(Vec::new()),
+            attrs: Some(attrs),
+            at,
+        })?;
+        self.lookup_key(&path, View::Live)
+    }
+
     /// New content version of a regular file (FUSE fsync path).
+    ///
+    /// Every live hard-link name of the same `file_id` gets the new content in
+    /// one index persist (POSIX inode semantics).
     pub fn replace_content(&self, path: &str, data: Vec<u8>) -> Result<FileHandle, ArkError> {
         let path = PathKey::parse(path)?;
         let h = self.lookup_key(&path, View::Live)?;
-        if h.attrs.file_type != FileType::File {
+        if h.attrs.file_type == FileType::Directory {
             return Err(ArkError::is_a_directory(path.as_str()));
+        }
+        if h.attrs.file_type != FileType::File {
+            return Err(ArkError::invalid_argument("not a regular file"));
         }
         let at = self.tick();
         self.commit_branch(BranchDelta {
             path: path.as_str().into(),
             content: Some(data),
-            attrs: Some(h.attrs),
+            attrs: Some(h.attrs.clone()),
             at,
         })?;
         self.lookup_key(&path, View::Live)
     }
 
     /// Append one version. Public for tests and facades; prefer mkdir/create/unlink.
+    ///
+    /// After the primary path is written, the same content/attrs ids are pushed
+    /// onto every other live name of `file_id` (hard-link fan-out) in this persist.
     pub fn commit_branch(&self, delta: BranchDelta) -> Result<(), ArkError> {
         let _commit = self.commit.lock().unwrap();
         let BranchDelta {
@@ -377,43 +512,37 @@ impl TemporalCore {
         let snapshot = self.index.lock().unwrap().clone();
         self.observe(at);
 
-        if let Some(last) = snapshot.paths.get(&path).and_then(|h| h.versions.last()) {
+        if let Some(last) = snapshot.last(&path) {
             if at <= last.at {
                 return Err(ArkError::conflict("commit timestamp before latest version"));
             }
         }
 
-        let parent = snapshot.paths.get(&path).and_then(|h| {
-            let n = h.versions.len();
-            (n > 0).then_some((n - 1) as u32)
-        });
-
-        let (content, mut attrs, next_file_id) = if let Some(hist) = snapshot.paths.get(&path) {
-            let last = hist
-                .versions
-                .last()
-                .ok_or_else(|| ArkError::not_found(path.as_str()))?;
-            let content = match content {
-                Some(c) => c,
-                None => self.store.get(&last.content_id)?,
-            };
-            let attrs = match attrs {
-                Some(a) => a,
-                None => codec::decode_attrs(&self.store.get(&last.attrs_id)?)?,
-            };
-            (content, attrs, snapshot.next_file_id)
-        } else {
-            let content = content.unwrap_or_default();
-            let mut attrs = attrs.unwrap_or_default();
-            let mut next = snapshot.next_file_id;
-            if attrs.file_id == 0 {
-                attrs.file_id = next;
-                next += 1;
-            } else if attrs.file_id >= next {
-                next = attrs.file_id + 1;
-            }
-            (content, attrs, next)
+        let parent = snapshot.version_parent(&path);
+        let last = snapshot.last(&path);
+        let content = match content {
+            Some(c) => c,
+            None => match last {
+                Some(l) => self.store.get(&l.content_id)?,
+                None => Vec::new(),
+            },
         };
+        let mut attrs = match attrs {
+            Some(a) => a,
+            None => match last {
+                Some(l) if !l.tombstone => codec::decode_attrs(&self.store.get(&l.attrs_id)?)?,
+                _ => FileAttributes::default(),
+            },
+        };
+        // Unassigned id (including create after tombstone) gets a new identity.
+        // Hard link / rename pass a non-zero file_id and keep it.
+        let mut next_file_id = snapshot.next_file_id.max(1);
+        if attrs.file_id == 0 {
+            attrs.file_id = next_file_id;
+            next_file_id = attrs.file_id.saturating_add(1);
+        } else if attrs.file_id >= next_file_id {
+            next_file_id = attrs.file_id.saturating_add(1);
+        }
 
         attrs.set_logical_size(content.len() as u64, SizePolicy::Logical);
         attrs.touch_change(at.to_timespec());
@@ -433,13 +562,32 @@ impl TemporalCore {
             file_id: attrs.file_id,
             file_type: attrs.file_type,
         };
+        let siblings = snapshot.live_siblings(rec.file_id, &path);
+        for p in &siblings {
+            if let Some(last) = snapshot.last(p) {
+                if at <= last.at {
+                    return Err(ArkError::conflict("commit timestamp before latest version"));
+                }
+            }
+        }
         let mut new_index = snapshot;
         new_index.next_file_id = next_file_id;
-        new_index.paths.entry(path).or_default().versions.push(rec);
+        new_index.push(path, rec.clone());
+        for p in siblings {
+            let parent = new_index.version_parent(&p);
+            new_index.push(
+                p,
+                VersionRecord {
+                    parent,
+                    ..rec.clone()
+                },
+            );
+        }
         self.persist_index(new_index)
     }
 
     /// Read-modify-write attrs at `path` (FUSE setattr / xattr). Reuses content.
+    /// Fans out to every live hard-link name of the inode.
     pub fn commit_attrs(
         &self,
         path: &str,
@@ -447,16 +595,17 @@ impl TemporalCore {
         at: Timestamp,
     ) -> Result<(), ArkError> {
         let current = self.lookup(path, View::Live)?;
-        let mut attrs = current.attrs;
+        let mut attrs = current.attrs.clone();
         mutator(&mut attrs);
         self.commit_branch(BranchDelta {
-            path: path.into(),
+            path: current.path.as_str().into(),
             content: None,
             attrs: Some(attrs),
             at,
         })
     }
 
+    /// [`Self::commit_attrs`] at the next clock tick. Returns the new live handle.
     pub fn commit_attrs_now(
         &self,
         path: &str,
@@ -467,6 +616,7 @@ impl TemporalCore {
         self.lookup(path, View::Live)
     }
 
+    /// Path-key lookup: pick the version in `view`, hide tombstones, fill `nlink`.
     fn lookup_key(&self, path: &PathKey, view: View) -> Result<FileHandle, ArkError> {
         let rec = {
             let index = self.index.lock().unwrap();
@@ -474,7 +624,8 @@ impl TemporalCore {
                 .paths
                 .get(path)
                 .ok_or_else(|| ArkError::not_found(path.as_str()))?;
-            let rec = record_in_view(hist, view)
+            let rec = hist
+                .record_in_view(view)
                 .cloned()
                 .ok_or_else(|| ArkError::not_found(path.as_str()))?;
             if rec.tombstone {
@@ -482,11 +633,92 @@ impl TemporalCore {
             }
             rec
         };
-        self.materialize(path, &rec)
+        let mut h = self.materialize(path, &rec)?;
+        h.attrs.nlink = self.link_count(path, &rec, view);
+        Ok(h)
+    }
+
+    /// Directory: 2 + live subdirs. File: number of live paths with this `file_id`.
+    fn link_count(&self, path: &PathKey, rec: &VersionRecord, view: View) -> u32 {
+        let index = self.index.lock().unwrap();
+        index.nlink(rec, path, view)
+    }
+
+    /// Swap two live names (and every descendant of each) in one persist.
+    fn exchange_tree(&self, a: &PathKey, b: &PathKey) -> Result<(), ArkError> {
+        let _commit = self.commit.lock().unwrap();
+        let mut snapshot = self.index.lock().unwrap().clone();
+        let at = self.tick();
+        self.observe(at);
+
+        let a_tree = snapshot.live_under(a);
+        let b_tree = snapshot.live_under(b);
+        if a_tree.is_empty() {
+            return Err(ArkError::not_found(a.as_str()));
+        }
+        if b_tree.is_empty() {
+            return Err(ArkError::not_found(b.as_str()));
+        }
+
+        let mut moves: Vec<(PathKey, VersionRecord)> = Vec::new();
+        for src in &a_tree {
+            let last = snapshot.last_live(src)?;
+            let newp = src
+                .rebase(a, b)
+                .ok_or_else(|| ArkError::invalid_argument("exchange rebase"))?;
+            moves.push((newp, last));
+        }
+        for src in &b_tree {
+            let last = snapshot.last_live(src)?;
+            let newp = src
+                .rebase(b, a)
+                .ok_or_else(|| ArkError::invalid_argument("exchange rebase"))?;
+            moves.push((newp, last));
+        }
+        for src in a_tree.iter().chain(b_tree.iter()) {
+            let last = snapshot.last_live(src)?;
+            let parent = snapshot.version_parent(src);
+            snapshot.push(src.clone(), last.continue_as(at, parent, true));
+        }
+        for (newp, last) in moves {
+            let parent = snapshot.version_parent(&newp);
+            snapshot.push(newp, last.continue_as(at, parent, false));
+        }
+        self.persist_index(snapshot)
+    }
+
+    /// Move `from` and every live descendant to `dest` in one persist.
+    fn rename_tree(&self, from: &PathKey, dest: &PathKey) -> Result<(), ArkError> {
+        let _commit = self.commit.lock().unwrap();
+        let mut snapshot = self.index.lock().unwrap().clone();
+        let at = self.tick();
+        self.observe(at);
+
+        let moving = snapshot.live_under(from);
+        if moving.is_empty() {
+            return Err(ArkError::not_found(from.as_str()));
+        }
+
+        if let Ok(last) = snapshot.last_live(dest) {
+            let parent = snapshot.version_parent(dest);
+            snapshot.push(dest.clone(), last.continue_as(at, parent, true));
+        }
+
+        for src in &moving {
+            let last = snapshot.last_live(src)?;
+            let newp = src
+                .rebase(from, dest)
+                .ok_or_else(|| ArkError::invalid_argument("rename rebase"))?;
+            let dest_parent = snapshot.version_parent(&newp);
+            snapshot.push(newp, last.continue_as(at, dest_parent, false));
+            let src_parent = snapshot.version_parent(src);
+            snapshot.push(src.clone(), last.continue_as(at, src_parent, true));
+        }
+        self.persist_index(snapshot)
     }
 
     /// Parent must be a live directory; dest name must not be live (tombstone is OK).
-    fn prepare_create(&self, parent: &str, name: &str, _dir: bool) -> Result<PathKey, ArkError> {
+    fn prepare_create(&self, parent: &str, name: &str) -> Result<PathKey, ArkError> {
         let parent = PathKey::parse(parent)?;
         self.require_dir(&parent, View::Live)?;
         let path = parent.join(name)?;
@@ -496,6 +728,7 @@ impl TemporalCore {
         Ok(path)
     }
 
+    /// Live lookup that must be a directory (`ENOTDIR` otherwise).
     fn require_dir(&self, path: &PathKey, view: View) -> Result<FileHandle, ArkError> {
         let h = self.lookup_key(path, view)?;
         if h.attrs.file_type != FileType::Directory {
@@ -508,52 +741,25 @@ impl TemporalCore {
     fn tombstone(&self, path: &PathKey) -> Result<(), ArkError> {
         let last = {
             let index = self.index.lock().unwrap();
-            let hist = index
-                .paths
-                .get(path)
-                .ok_or_else(|| ArkError::not_found(path.as_str()))?;
-            hist.versions
-                .last()
-                .cloned()
-                .ok_or_else(|| ArkError::not_found(path.as_str()))?
+            index.last_live(path)?
         };
-        if last.tombstone {
-            return Err(ArkError::not_found(path.as_str()));
-        }
         let at = self.tick();
         let _commit = self.commit.lock().unwrap();
-        let snapshot = self.index.lock().unwrap().clone();
+        let mut snapshot = self.index.lock().unwrap().clone();
         self.observe(at);
-        if let Some(cur) = snapshot.paths.get(path).and_then(|h| h.versions.last()) {
+        if let Some(cur) = snapshot.last(path) {
             if at <= cur.at {
                 return Err(ArkError::conflict("commit timestamp before latest version"));
             }
         }
-        let parent = snapshot.paths.get(path).and_then(|h| {
-            let n = h.versions.len();
-            (n > 0).then_some((n - 1) as u32)
-        });
-        let rec = VersionRecord {
-            content_id: last.content_id,
-            attrs_id: last.attrs_id,
-            at,
-            parent,
-            tombstone: true,
-            file_id: last.file_id,
-            file_type: last.file_type,
-        };
-        let mut new_index = snapshot;
-        new_index
-            .paths
-            .entry(path.clone())
-            .or_default()
-            .versions
-            .push(rec);
-        self.persist_index(new_index)
+        let parent = snapshot.version_parent(path);
+        snapshot.push(path.clone(), last.continue_as(at, parent, true));
+        self.persist_index(snapshot)
     }
 
     /// `put` the encoded index then move the `temporal_index` anchor.
-    fn persist_index(&self, new_index: DurableIndex) -> Result<(), ArkError> {
+    fn persist_index(&self, mut new_index: DurableIndex) -> Result<(), ArkError> {
+        new_index.rebuild_ino_map();
         let index_id = self.store.put(&encode_index(&new_index), self.quorum)?;
         self.store
             .set_anchor(INDEX_ANCHOR, &index_id, self.quorum)?;
@@ -561,6 +767,7 @@ impl TemporalCore {
         Ok(())
     }
 
+    /// Decode attrs from CAS and build a handle. Does not compute `nlink`.
     fn materialize(&self, path: &PathKey, rec: &VersionRecord) -> Result<FileHandle, ArkError> {
         let attrs = codec::decode_attrs(&self.store.get(&rec.attrs_id)?)?;
         Ok(FileHandle {
@@ -571,6 +778,7 @@ impl TemporalCore {
         })
     }
 
+    /// Advance the hybrid-logical clock and return the new timestamp.
     fn tick(&self) -> Timestamp {
         let wall = wall_nanos();
         let mut c = self.clock.lock().unwrap();
@@ -578,6 +786,7 @@ impl TemporalCore {
         *c
     }
 
+    /// Merge an incoming timestamp into the local clock (never go backwards).
     fn observe(&self, at: Timestamp) {
         let mut c = self.clock.lock().unwrap();
         if at.logical > c.logical {
@@ -587,10 +796,12 @@ impl TemporalCore {
         }
     }
 
+    /// The CAS this core writes. FUSE tests use it via `inspect`, not this getter.
     pub fn store(&self) -> &PersistentObjectStore {
         &self.store
     }
 
+    /// Cactus parent indexes for tests (`None` is the first version of the path).
     #[cfg(test)]
     fn parents(&self, path: &str) -> Vec<Option<u32>> {
         let path = PathKey::parse(path).unwrap();
@@ -604,6 +815,7 @@ impl TemporalCore {
     }
 }
 
+/// Wall clock for hybrid timestamps. Missing system time becomes 0.
 fn wall_nanos() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -611,339 +823,5 @@ fn wall_nanos() -> u64 {
         .unwrap_or(0)
 }
 
-fn max_timestamp(index: &DurableIndex) -> Timestamp {
-    let mut max = Timestamp::ZERO;
-    for hist in index.paths.values() {
-        for v in &hist.versions {
-            if v.at > max {
-                max = v.at;
-            }
-        }
-    }
-    max
-}
-
-/// Live = last version (caller checks tombstone). AsOf = last `at <= ts`.
-fn record_in_view(hist: &PathHistory, view: View) -> Option<&VersionRecord> {
-    match view {
-        View::Live => hist.versions.last(),
-        View::AsOf(ts) => hist.versions.iter().rev().find(|v| v.at <= ts),
-    }
-}
-
-fn find_ino(index: &DurableIndex, ino: u64, view: View) -> Option<PathKey> {
-    for (path, hist) in &index.paths {
-        if let Some(rec) = record_in_view(hist, view) {
-            if !rec.tombstone && rec.file_id == ino {
-                return Some(path.clone());
-            }
-        }
-    }
-    None
-}
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use arkfs_core::attr_map::{merge_from_fuse, FuseSetAttr};
-    use arkfs_core::{DosFlags, MacOsFlags, NamedStream, Timespec};
-    use persistent_object_store::open_local_quorum_store;
-
-    fn core() -> (tempfile::TempDir, TemporalCore) {
-        let dir = tempfile::tempdir().unwrap();
-        let store = open_local_quorum_store(dir.path(), &["n0", "n1"]).unwrap();
-        (
-            dir,
-            TemporalCore::open(store, QuorumPolicy::Quorum(1)).unwrap(),
-        )
-    }
-
-    #[test]
-    fn commit_and_lookup_current() {
-        let (_d, tc) = core();
-        let t0 = Timestamp::new(1, 1000);
-        tc.commit_branch(BranchDelta {
-            path: "/notes.txt".into(),
-            content: Some(b"v1".to_vec()),
-            attrs: None,
-            at: t0,
-        })
-        .unwrap();
-        let h = tc.lookup_current("/notes.txt").unwrap();
-        assert_eq!(tc.read_content(&h).unwrap(), b"v1");
-        assert_eq!(h.attrs.logical_size, 2);
-    }
-
-    #[test]
-    fn historical_lookup_never_delete() {
-        let (_d, tc) = core();
-        let t0 = Timestamp::new(1, 1000);
-        let t1 = Timestamp::new(2, 2000);
-        tc.commit_branch(BranchDelta {
-            path: "/f".into(),
-            content: Some(b"old".to_vec()),
-            attrs: None,
-            at: t0,
-        })
-        .unwrap();
-        tc.commit_branch(BranchDelta {
-            path: "/f".into(),
-            content: Some(b"new".to_vec()),
-            attrs: None,
-            at: t1,
-        })
-        .unwrap();
-        assert_eq!(
-            tc.read_content(&tc.lookup_at_timestamp("/f", t0).unwrap())
-                .unwrap(),
-            b"old"
-        );
-        assert_eq!(
-            tc.read_content(&tc.lookup_at_timestamp("/f", t1).unwrap())
-                .unwrap(),
-            b"new"
-        );
-        assert_eq!(
-            tc.read_content(&tc.lookup_current("/f").unwrap()).unwrap(),
-            b"new"
-        );
-        assert_eq!(tc.parents("/f"), vec![None, Some(0)]);
-    }
-
-    #[test]
-    fn attr_historical_snapshot() {
-        let (_d, tc) = core();
-        let mut a0 = FileAttributes::new_file(0, 0o644);
-        a0.dos.hidden = true;
-        a0.dos.archive = true;
-        a0.xattrs
-            .insert("com.apple.quarantine".into(), b"q".to_vec());
-        let t0 = Timestamp::new(1, 1);
-        tc.commit_branch(BranchDelta {
-            path: "/a".into(),
-            content: Some(b"x".to_vec()),
-            attrs: Some(a0.clone()),
-            at: t0,
-        })
-        .unwrap();
-
-        let t1 = Timestamp::new(2, 2);
-        tc.commit_attrs(
-            "/a",
-            |attrs| {
-                attrs.dos.hidden = false;
-                attrs.mode = 0o600;
-            },
-            t1,
-        )
-        .unwrap();
-
-        let past = tc.lookup_at_timestamp("/a", t0).unwrap();
-        assert!(past.attrs.dos.hidden);
-        assert!(past.attrs.dos.archive);
-        assert_eq!(past.attrs.mode, 0o644);
-        assert!(past.attrs.xattrs.contains_key("com.apple.quarantine"));
-
-        let cur = tc.lookup_current("/a").unwrap();
-        assert!(!cur.attrs.dos.hidden);
-        assert!(cur.attrs.dos.archive);
-        assert_eq!(cur.attrs.mode, 0o600);
-        assert!(cur.attrs.xattrs.contains_key("com.apple.quarantine"));
-    }
-
-    #[test]
-    fn fuse_partial_does_not_clobber_smb_macos() {
-        let (_d, tc) = core();
-        let mut a = FileAttributes::new_file(0, 0o644);
-        a.dos = DosFlags {
-            hidden: true,
-            system: true,
-            archive: true,
-            ..Default::default()
-        };
-        a.macos = MacOsFlags {
-            uf_immutable: true,
-            ..Default::default()
-        };
-        a.dead_props.insert("{urn:ex}color".into(), "blue".into());
-        a.streams.push(NamedStream {
-            name: NamedStream::RESOURCE_FORK.into(),
-            size: 8,
-            content_id: None,
-        });
-        let t0 = Timestamp::new(1, 1);
-        tc.commit_branch(BranchDelta {
-            path: "/m".into(),
-            content: Some(b"data".to_vec()),
-            attrs: Some(a),
-            at: t0,
-        })
-        .unwrap();
-
-        let t1 = Timestamp::new(2, 2);
-        tc.commit_attrs(
-            "/m",
-            |attrs| {
-                merge_from_fuse(
-                    attrs,
-                    &FuseSetAttr {
-                        mode: Some(0o700),
-                        uid: Some(99),
-                        gid: None,
-                        size: None,
-                        atime: None,
-                        mtime: None,
-                        ctime: None,
-                    },
-                    Timespec::new(2, 0),
-                );
-            },
-            t1,
-        )
-        .unwrap();
-
-        let h = tc.lookup_current("/m").unwrap();
-        assert_eq!(h.attrs.mode, 0o700);
-        assert_eq!(h.attrs.uid, 99);
-        assert!(h.attrs.dos.hidden);
-        assert!(h.attrs.dos.system);
-        assert!(h.attrs.dos.archive);
-        assert!(h.attrs.macos.uf_immutable);
-        assert_eq!(
-            h.attrs.dead_props.get("{urn:ex}color").map(String::as_str),
-            Some("blue")
-        );
-        assert!(h
-            .attrs
-            .streams
-            .iter()
-            .any(|s| s.name == NamedStream::RESOURCE_FORK));
-    }
-
-    #[test]
-    fn directory_roundtrip() {
-        let (_d, tc) = core();
-        let t0 = Timestamp::new(1, 1);
-        tc.commit_branch(BranchDelta {
-            path: "/dir".into(),
-            content: Some(Vec::new()),
-            attrs: Some(FileAttributes::new_dir(0, 0o755)),
-            at: t0,
-        })
-        .unwrap();
-        let h = tc.lookup_current("/dir").unwrap();
-        assert_eq!(h.attrs.file_type, FileType::Directory);
-        assert_eq!(h.attrs.nlink, 2);
-        assert!(h.attrs.dos.directory);
-        assert!(h.attrs.streams.is_empty());
-        assert_eq!(h.attrs.mode, 0o755);
-    }
-
-    #[test]
-    fn conflict_before_write_keeps_latest() {
-        let (_d, tc) = core();
-        tc.commit_branch(BranchDelta {
-            path: "/c".into(),
-            content: Some(b"new".to_vec()),
-            attrs: None,
-            at: Timestamp::new(2, 2),
-        })
-        .unwrap();
-        let err = tc
-            .commit_branch(BranchDelta {
-                path: "/c".into(),
-                content: Some(b"old".to_vec()),
-                attrs: None,
-                at: Timestamp::new(1, 1),
-            })
-            .unwrap_err();
-        assert!(matches!(err, ArkError::Conflict { .. }));
-        assert_eq!(
-            tc.read_content(&tc.lookup_current("/c").unwrap()).unwrap(),
-            b"new"
-        );
-    }
-
-    #[test]
-    fn index_survives_reopen() {
-        let dir = tempfile::tempdir().unwrap();
-        {
-            let store = open_local_quorum_store(dir.path(), &["n0", "n1"]).unwrap();
-            let tc = TemporalCore::open(store, QuorumPolicy::Quorum(1)).unwrap();
-            tc.commit_branch(BranchDelta {
-                path: "/p".into(),
-                content: Some(b"persist".to_vec()),
-                attrs: None,
-                at: Timestamp::new(1, 1),
-            })
-            .unwrap();
-            tc.commit_branch(BranchDelta {
-                path: "/p".into(),
-                content: Some(b"persist2".to_vec()),
-                attrs: None,
-                at: Timestamp::new(2, 2),
-            })
-            .unwrap();
-        }
-        let store = open_local_quorum_store(dir.path(), &["n0", "n1"]).unwrap();
-        let tc = TemporalCore::open(store, QuorumPolicy::Quorum(1)).unwrap();
-        let h = tc.lookup_current("/p").unwrap();
-        assert_eq!(tc.read_content(&h).unwrap(), b"persist2");
-        assert_eq!(h.attrs.file_id, 1);
-        assert_eq!(tc.parents("/p"), vec![None, Some(0)]);
-    }
-
-    #[test]
-    fn mkdir_readdir_unlink_as_of() {
-        let (_d, tc) = core();
-        tc.ensure_root().unwrap();
-        tc.mkdir("/", "d", 0o755, 0, 0).unwrap();
-        tc.create_file("/d", "f.txt", 0o644, 0, 0).unwrap();
-        let written = tc.replace_content("/d/f.txt", b"hello".to_vec()).unwrap();
-        let names: Vec<_> = tc
-            .readdir("/d", View::Live)
-            .unwrap()
-            .into_iter()
-            .map(|e| e.name)
-            .collect();
-        assert_eq!(names, vec!["f.txt"]);
-        let before = written.committed_at;
-        tc.unlink("/d/f.txt").unwrap();
-        assert!(tc.lookup_current("/d/f.txt").is_err());
-        assert!(tc.readdir("/d", View::Live).unwrap().is_empty());
-        let past = tc.lookup_at_timestamp("/d/f.txt", before).unwrap();
-        assert_eq!(tc.read_content(&past).unwrap(), b"hello");
-        let ino_root = tc.lookup_current("/").unwrap().attrs.file_id;
-        assert_eq!(ino_root, 1);
-        let h = tc.lookup_ino(ino_root, View::Live).unwrap();
-        assert!(h.path.is_root());
-    }
-
-    #[test]
-    fn rename_and_rmdir() {
-        let (_d, tc) = core();
-        tc.ensure_root().unwrap();
-        tc.mkdir("/", "a", 0o755, 0, 0).unwrap();
-        tc.create_file("/a", "x", 0o644, 0, 0).unwrap();
-        tc.replace_content("/a/x", b"z".to_vec()).unwrap();
-        tc.rename("/a/x", "/a", "y").unwrap();
-        assert!(tc.lookup_current("/a/x").is_err());
-        assert_eq!(
-            tc.read_content(&tc.lookup_current("/a/y").unwrap())
-                .unwrap(),
-            b"z"
-        );
-        tc.unlink("/a/y").unwrap();
-        tc.rmdir("/a").unwrap();
-        assert!(tc.lookup_current("/a").is_err());
-    }
-
-    #[test]
-    fn create_rejects_existing() {
-        let (_d, tc) = core();
-        tc.ensure_root().unwrap();
-        tc.create_file("/", "e", 0o644, 0, 0).unwrap();
-        let err = tc.create_file("/", "e", 0o644, 0, 0).unwrap_err();
-        assert!(matches!(err, ArkError::AlreadyExists { .. }));
-    }
-}
+mod engine_tests;

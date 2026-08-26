@@ -11,5 +11,8 @@ blake3 = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 
+[dev-dependencies]
+arkfs_test_review = { workspace = true }
+
 [lints]
 workspace = true

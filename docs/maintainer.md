@@ -87,12 +87,18 @@ These words show up in comments and types. Use them consistently.
 ## Repository layout
 
 ```
-Makefile                 # organizer: build, test, ci, precommit
+Makefile                 # organizer: build, test, ci, prepush, setup
+make/setup.mk            # clone/checkout: git hooks + scripts/setup-tools.sh
+rust-toolchain.toml      # rustup stable + rustfmt/clippy/llvm-tools
+scripts/setup-tools.sh   # rustup, Kani, Miri, llvm-cov (no-op when CI is set)
 make/rust.mk             # cargo workspace wrappers
 make/elixir.mk           # per-package mix (no umbrella)
 make/ci.mk               # GitHub bar: fmt + tests
 make/verify.mk           # local bar: clippy + Kani + Miri + llvm-cov + live FUSE
-.githooks/pre-commit     # runs `make precommit` unless ARKFS_SKIP_PRECOMMIT=1
+libs/rust/test_review    # NDJSON test logs (dev-dependency only)
+.githooks/pre-push       # runs `make prepush` unless ARKFS_SKIP_PREPUSH=1
+.githooks/post-checkout  # install tools after clone/checkout (once hooksPath is set)
+.githooks/post-merge     # re-install tools after pull/merge
 Cargo.toml               # Rust workspace members + shared deps
 libs/rust/arkfs_core     # types, codec, paths, quorum, attr_map
 libs/rust/persistent_object_store
@@ -192,37 +198,58 @@ reviewing that path.
   `fallocate` / `lseek`).
 - Names must be UTF-8; otherwise `EINVAL`.
 - Root inode is `FUSE_ROOT_ID` (1), even if some other `file_id` is stored.
-- TTL is 1s (`session::TTL`). The kernel may cache attrs that long.
+- TTL is 0 (`session::TTL`). The kernel must not cache attrs across
+  link/unlink (stale `nlink` / size).
+- Unix permission bits (and stored ACLs when present) are enforced in
+  `ArkSession`. `lookup` needs parent `X_OK`; `readdir` needs `R+X`;
+  `opendir` needs `X_OK`. `umask` is applied on mkdir/create/mknod.
+  Setgid directories inherit gid. Fifo/device/socket `open` is `ENXIO`.
+  Path components longer than 255 bytes are `ENAMETOOLONG`. Writes above
+  1 GiB are `EFBIG`. Disk-full I/O is `ENOSPC`. xattr `XATTR_CREATE` /
+  `XATTR_REPLACE` are honoured. Relatime updates `atime` on read.
+- `statfs` reports 4096-byte blocks, live path count, and backing-fs free
+  space. Live inode lookup is O(1); `View::AsOf` still scans.
 - `IMPLEMENTED_FUSE_OPS` is the reachability contract. Adding a
   `Filesystem` method requires a table entry and a `fuse_*` test.
-- Production `mount()` currently passes `AutoUnmount` + `DefaultPermissions`.
-  `AutoUnmount` without `AllowOther` makes fusermount request `allow_other`,
-  which stock `/etc/fuse.conf` often disables. Tests use `spawn()` without
-  those flags. Prefer the test flags for unprivileged mounts.
-- Do **not** implement `getlk`/`setlk`/`poll` as no-ops unless you understand
-  the kernel fallback: ENOSYS from userspace restores in-kernel POSIX locks
-  and “always ready” poll. Returning success with `F_UNLCK` or `poll(0)`
-  *opts in* to userspace and then does nothing useful.
+- Production `mount()` and tests use `FSName` plus `RO` when `--as-of` is set.
+  Do **not** pass `AutoUnmount`: fusermount then requests `allow_other`, which
+  stock `/etc/fuse.conf` often disables.
+- POSIX locks (`getlk`/`setlk`/`setlkw`) and poll are implemented in
+  userspace (`posix_lock::LockTable`, always-ready poll). `init` advertises
+  `FUSE_POSIX_LOCKS` / `FUSE_FLOCK_LOCKS`. SETLKW replies from a helper
+  thread so the single-threaded session loop can still process the unlock.
+  Returning success with `F_UNLCK` or `poll(0)` while implementing the
+  methods would opt in and then do nothing useful — do not do that.
 
 Live tests: `libs/rust/fuse_facade/tests/fuse_drive.rs`. They skip when `CI`
-is set and `/dev/fuse` is missing. Local pre-commit sets
+is set and `/dev/fuse` is missing. Local pre-push sets
 `ARKFS_REQUIRE_FUSE=1` and **fails** if FUSE is absent.
 
 ## How to build and test
 
 ```bash
+make setup         # after clone: rustfmt, clippy, Kani, Miri, llvm-cov, git hooks
 make help
-make test          # cargo test --workspace + mix test per package
+make test          # cargo test --workspace + mix test (also sets git hooksPath)
 make ci            # GitHub: rustfmt + mix format + those tests
-make install-hooks # once per clone: git hooksPath -> .githooks
-make precommit     # local: ci + clippy -D warnings + Kani + Miri + llvm-cov + live FUSE
+make prepush       # local push bar: clippy + tests + Kani + Miri + llvm-cov + live FUSE
 ```
+
+Every Rust and Elixir test appends NDJSON to `target/arkfs-test-review/events.ndjson`
+(override with `ARKFS_TEST_REVIEW_DIR`). Events are `start` / `step` / `assert` /
+`panic` / `end` with expected vs actual on asserts. Disable with
+`ARKFS_TEST_REVIEW=0`. Off under Miri/Kani. Use this file for later automated
+review of what ran and what was checked.
+
+`make build` / `make test` / `make all` call `setup-hooks` so the first Make target after clone sets `core.hooksPath=.githooks`. Until that runs, `git push` has no pre-push hook — run `make test` or `make setup` once. There is no `pre-commit` hook: **commits are not gated**.
+
+`scripts/setup-tools.sh` is the installer. `.githooks/post-checkout` and `post-merge` call it, so **checkout and pull keep tools installed** once hooksPath is set. `CI` or `ARKFS_SKIP_SETUP=1` skips it. `rust-toolchain.toml` makes rustup fetch stable + rustfmt/clippy/llvm-tools on the first `cargo` in the tree. `make prepush` does **not** re-run the installer.
 
 GitHub Actions (`.github/workflows/ci.yml`) runs **`make ci` only**. It must
 not require `/dev/fuse`, Kani, Miri, or llvm-cov.
 
-Emergency commit bypass: `git commit --no-verify` or `ARKFS_SKIP_PRECOMMIT=1`.
-Do not use this to skip a failing invariant.
+Emergency push bypass: `git push --no-verify` or `ARKFS_SKIP_PREPUSH=1`.
+Do not use this to skip a failing invariant. Commits are not gated on tests.
 
 ### Formal tools (local only)
 
@@ -230,7 +257,7 @@ Do not use this to skip a failing invariant.
 |------|----------------|--------|
 | rustfmt | formatting | `cargo fmt --all -- --check` |
 | clippy `-D warnings` | lints as errors | workspace |
-| Kani | bounded proofs on `io_buf`, `xattr`, `PathKey`, errno table | `fuse_facade`, `arkfs_core` |
+| Kani | bounded proofs on `io_buf` / `xattr` | `fuse_facade` harnesses |
 | Miri | UB on PathKey parse | `arkfs_core` `path_parse` |
 | llvm-cov | line coverage on `fuse_facade` (≥ 80%) | live FUSE included when required |
 
@@ -276,11 +303,8 @@ always_on_count() -> reachable remotes (not including local)
 Then pass `Box::new(your_backend)` to `PersistentObjectStore::open`.
 
 - Cluster tests: `LocalQuorum` + `open_local_quorum_store`.
-- Single-node FUSE: no peers. `replicate_*` → `Ok(0)`, `always_on_count` → 0,
-  never mkdir `replicas/`.
-
-Do not call `skip(1)` and hope an empty vec means isolated. Name the type so
-the next reader can see the intent.
+- Single-node FUSE: [`open_isolated_store`] / `NoPeers` (`replicate_*` → 0,
+  `always_on_count` → 0, never mkdir `replicas/`).
 
 ## Locks and concurrency
 
@@ -296,9 +320,8 @@ Pattern: clone the index snapshot, drop the index lock, `put` objects, then
 `persist_index`. Holding `index` across `store.put` will deadlock or stall
 lookups.
 
-`ArkSession.files` is a mutex around the fh map. `fsync` clones dirty bytes,
-drops the lock, writes, then re-locks to clear `dirty`. That avoids I/O under
-the fh lock.
+`ArkSession` shares one dirty buffer per inode. `flush_ino` clones bytes,
+drops the lock, writes, then clears `dirty`. That avoids I/O under the lock.
 
 `.lock().unwrap()` means “poisoned mutex = prior panic”. That is intentional
 fail-fast, not a forgotten error path.
@@ -307,27 +330,21 @@ fail-fast, not a forgotten error path.
 
 These are easy to get wrong. Check them in review.
 
-1. **Inode 0.** `commit_branch` allocates `file_id` only when the *path is
-   new*. A tombstone still occupies the path key, so unlink+create can store
-   `file_id = 0`. FUSE treats nodeid 0 as “negative lookup” (ENOENT). Always
-   allocate a new id when the last version is a tombstone, and never publish
-   inode 0 for a non-root.
-2. **Directory rename.** `rename` copies one path and tombstones the source.
-   Child paths are not rewritten. `mkdir a/x; rename a b` currently leaves
-   `/a/x` live. Either implement subtree retarget or reject directory rename.
-3. **Open-file cache is per-fh.** Two fhs do not share a buffer. `O_TRUNC`
-   dirties one fh only. `OpenFile.path` is a snapshot: rename/unlink then
-   fsync writes the old path.
-4. **`release` ignores fsync errors.** `let _ = self.fsync(fh)` then drops
-   the buffer. Close can lose dirty data.
-5. **Conflict-before-write.** `commit_branch` rejects `at <= last.at` *before*
+1. **Inode 0.** `commit_branch` must assign a new `file_id` when attrs still
+   have 0 (including after a tombstone). FUSE treats nodeid 0 as ENOENT.
+2. **Directory rename** retargets every live descendant in one index persist
+   (`PathKey::rebase`). Open-file caches are resynced by inode (`lookup_ino`).
+   Do not copy only the directory path — children would vanish from the live tree.
+3. **Open-file cache is per-inode.** Two fhs share one buffer. `release` must
+   persist before dropping the fh; on failure keep the buffer and return the error.
+4. **Conflict-before-write.** `commit_branch` rejects `at <= last.at` *before*
    `put`. Do not persist then roll back.
-6. **Partial setattr.** Always `merge_from_*`, never replace the whole
+5. **Partial setattr.** Always `merge_from_*`, never replace the whole
    `FileAttributes` from a protocol struct.
-7. **GitHub vs local.** A test that needs `/dev/fuse` must skip when `CI` is
+6. **GitHub vs local.** A test that needs `/dev/fuse` must skip when `CI` is
    set. A test that is the local bar must fail when `ARKFS_REQUIRE_FUSE=1`
    and FUSE is missing.
-8. **Elixir harness is not the store.** `SimulationHarness` records clock,
+7. **Elixir harness is not the store.** `SimulationHarness` records clock,
    delay, and chaos *intent*. Integrity of CAS and temporal lookup is proven
    in `cargo test` on the Rust crates.
 

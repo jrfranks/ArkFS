@@ -11,6 +11,7 @@ pub enum SizedBytes {
     Range,
 }
 
+/// size=0 → length; too small → Range; else Data.
 pub fn sized(value: &[u8], size: u32) -> SizedBytes {
     if size == 0 {
         SizedBytes::Size(value.len() as u32)
@@ -21,6 +22,7 @@ pub fn sized(value: &[u8], size: u32) -> SizedBytes {
     }
 }
 
+/// FUSE listxattr payload: name\\0name\\0.
 pub fn encode_list<'a, I>(names: I) -> Vec<u8>
 where
     I: IntoIterator<Item = &'a str>,
@@ -36,16 +38,26 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[allow(unused_imports)]
+    use arkfs_test_review::{
+        review_assert as assert, review_eq as assert_eq, review_ne as assert_ne,
+    };
 
+    /// Prove the three-way size protocol (length / ERANGE / data).
     #[test]
     fn size_zero_reports_length() {
+        let _g = arkfs_test_review::guard();
         assert_eq!(sized(b"abcd", 0), SizedBytes::Size(4));
         assert_eq!(sized(b"abcd", 3), SizedBytes::Range);
         assert_eq!(sized(b"abcd", 4), SizedBytes::Data(b"abcd".to_vec()));
+        assert_eq!(sized(b"", 0), SizedBytes::Size(0));
+        assert_eq!(sized(b"", 1), SizedBytes::Data(Vec::new()));
     }
 
+    /// Prove list encoding is C strings, not commas.
     #[test]
     fn list_is_nul_separated() {
+        let _g = arkfs_test_review::guard();
         assert_eq!(encode_list(["user.a", "user.b"]), b"user.a\0user.b\0");
     }
 }
@@ -54,6 +66,7 @@ mod tests {
 mod kani_proofs {
     use super::*;
 
+    /// Kani: Range iff the caller buffer is non-zero and too small.
     #[kani::proof]
     #[kani::unwind(32)]
     fn range_iff_too_small() {

@@ -5,12 +5,12 @@ If you are new to this repository, read [docs/maintainer.md](../docs/maintainer.
 Make is the monorepo organizer. Cargo and Mix are per-package tools.
 
 ```bash
+make setup         # clone/checkout: install rustfmt/clippy/Kani/Miri/llvm-cov + git hooks
 make help
-make test
+make test          # package tests (does not install Kani)
 make fmt
-make ci            # GitHub: fmt + package tests only
-make install-hooks # once: pre-commit runs the full local bar
-make precommit     # all tests + clippy + Kani + Miri + llvm-cov
+make ci            # GitHub: fmt + package tests only (no proof tools)
+make prepush       # all tests + clippy + Kani + Miri + llvm-cov (git push hook)
 ```
 
 Libraries live under `libs/`; runnable apps under `apps/`. There is no Mix umbrella.
@@ -21,6 +21,6 @@ Libraries live under `libs/`; runnable apps under `apps/`. There is no Mix umbre
 
 GitHub Actions runs **`make ci` only**: rustfmt, mix format, `cargo test --workspace`, Elixir `mix test`. No clippy-as-error, Kani, Miri, or coverage.
 
-Commits on a machine with hooks installed (`make install-hooks`) run **`make precommit`**: the GitHub set plus clippy `-D warnings` and required Kani, Miri, and llvm-cov. Emergency bypass: `git commit --no-verify` or `ARKFS_SKIP_PRECOMMIT=1`.
+The first `make setup`, `make test`, or `make build` after clone sets `core.hooksPath` to `.githooks`. After that, `git checkout` / `git merge` / `git pull` run `.githooks/post-checkout` and `post-merge`, which call `scripts/setup-tools.sh`. There is no pre-commit hook. **`git commit` does not run tests.** **`git push` runs `make prepush`.** Emergency bypass: `git push --no-verify`, `ARKFS_SKIP_PREPUSH=1`, or `ARKFS_SKIP_SETUP=1`.
 
 Code owner is [@jrfranks](https://github.com/jrfranks). The project is MIT licensed (see [LICENSE](../LICENSE)).

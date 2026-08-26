@@ -58,6 +58,24 @@ pub enum ArkError {
 
     #[error("not implemented: {detail}")]
     NotImplemented { detail: String },
+
+    #[error("resource busy: {detail}")]
+    Busy { detail: String },
+
+    #[error("permission denied: {what}")]
+    PermissionDenied { what: String },
+
+    #[error("no such device: {what}")]
+    NoSuchDevice { what: String },
+
+    #[error("name too long: {what}")]
+    NameTooLong { what: String },
+
+    #[error("no space left on device: {detail}")]
+    NoSpace { detail: String },
+
+    #[error("file too large: {detail}")]
+    FileTooLarge { detail: String },
 }
 
 impl ArkError {
@@ -114,16 +132,58 @@ impl ArkError {
         }
     }
 
-    /// Feature the facade refuses (device mknod, unsupported fallocate mode).
+    /// Feature the facade refuses (unsupported fallocate mode).
     pub fn not_implemented(detail: impl Into<String>) -> Self {
         ArkError::NotImplemented {
+            detail: detail.into(),
+        }
+    }
+
+    /// POSIX `EAGAIN` / `EWOULDBLOCK` (fcntl lock conflict).
+    pub fn busy(detail: impl Into<String>) -> Self {
+        ArkError::Busy {
+            detail: detail.into(),
+        }
+    }
+
+    /// POSIX `EACCES` (Unix permission bits, sticky bit, chmod/chown).
+    pub fn permission_denied(what: impl Into<String>) -> Self {
+        ArkError::PermissionDenied { what: what.into() }
+    }
+
+    /// POSIX `ENXIO` (open of fifo/device/socket with no userspace driver).
+    pub fn no_such_device(what: impl Into<String>) -> Self {
+        ArkError::NoSuchDevice { what: what.into() }
+    }
+
+    /// POSIX `ENAMETOOLONG` (path component longer than 255 bytes).
+    pub fn name_too_long(what: impl Into<String>) -> Self {
+        ArkError::NameTooLong { what: what.into() }
+    }
+
+    /// POSIX `ENOSPC` (backing disk full during a durable write).
+    pub fn no_space(detail: impl Into<String>) -> Self {
+        ArkError::NoSpace {
+            detail: detail.into(),
+        }
+    }
+
+    /// POSIX `EFBIG` (write would exceed the in-memory object size cap).
+    pub fn file_too_large(detail: impl Into<String>) -> Self {
+        ArkError::FileTooLarge {
             detail: detail.into(),
         }
     }
 }
 
 impl From<io::Error> for ArkError {
+    /// Disk-full becomes [`ArkError::NoSpace`]; other I/O stays `Io`.
     fn from(e: io::Error) -> Self {
+        // ENOSPC is 28 on Linux/macOS; ERROR_DISK_FULL is 112 on Windows.
+        match e.raw_os_error() {
+            Some(28) | Some(112) => return ArkError::no_space(e.to_string()),
+            _ => {}
+        }
         ArkError::Io {
             kind: e.kind(),
             message: e.to_string(),

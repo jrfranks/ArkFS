@@ -114,6 +114,7 @@ pub fn inspect(data_dir: &Path) -> DiskView {
 }
 
 impl DiskView {
+    /// No stray .tmp staging files; root `/` is live.
     pub fn assert_clean(&self) {
         assert!(
             self.stray_tmp.is_empty(),
@@ -123,6 +124,7 @@ impl DiskView {
         assert!(self.live.contains_key("/"), "root must exist on disk");
     }
 
+    /// Live path is a regular file whose CAS bytes equal `body`.
     pub fn assert_file(&self, path: &str, body: &[u8]) {
         let n = self
             .live
@@ -133,6 +135,17 @@ impl DiskView {
         assert_eq!(n.attrs.logical_size, body.len() as u64);
     }
 
+    /// Live path is a FIFO (mknod S_IFIFO). Content is empty.
+    pub fn assert_fifo(&self, path: &str) {
+        let n = self
+            .live
+            .get(path)
+            .unwrap_or_else(|| panic!("missing live {path}"));
+        assert_eq!(n.file_type, FileType::Fifo, "{path} type");
+        assert!(n.content.is_empty(), "{path} fifo content");
+    }
+
+    /// Live path is a directory.
     pub fn assert_dir(&self, path: &str) {
         let n = self
             .live
@@ -141,6 +154,7 @@ impl DiskView {
         assert_eq!(n.file_type, FileType::Directory, "{path} type");
     }
 
+    /// Live path is a symlink whose stored target equals `target`.
     pub fn assert_symlink(&self, path: &str, target: &str) {
         let n = self
             .live
@@ -150,6 +164,7 @@ impl DiskView {
         assert_eq!(n.attrs.symlink_target.as_deref(), Some(target));
     }
 
+    /// Path is tombstoned in the index and absent from the live map.
     pub fn assert_tombstone(&self, path: &str) {
         assert!(
             self.tombstoned.contains(path),
@@ -160,6 +175,7 @@ impl DiskView {
         assert!(!self.live.contains_key(path));
     }
 
+    /// Every object id in `before` is still on disk (never-delete).
     pub fn assert_never_deleted_objects(&self, before: &BTreeSet<String>) {
         for id in before {
             assert!(

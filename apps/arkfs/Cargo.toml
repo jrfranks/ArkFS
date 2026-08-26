@@ -8,3 +8,6 @@ description = "ArkFS single-node FUSE mount"
 
 [dependencies]
 fuse_facade = { workspace = true }
+
+[dev-dependencies]
+arkfs_test_review = { workspace = true }

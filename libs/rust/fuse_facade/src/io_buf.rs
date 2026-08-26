@@ -32,19 +32,45 @@ pub fn apply_write(data: &mut Vec<u8>, offset: i64, buf: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[allow(unused_imports)]
+    use arkfs_test_review::{
+        review_assert as assert, review_eq as assert_eq, review_ne as assert_ne,
+    };
 
+    /// Read past EOF is empty; negative offset reads from 0.
     #[test]
     fn read_past_end_is_empty() {
+        let _g = arkfs_test_review::guard();
         assert!(read_slice(b"hi", 10, 4).is_empty());
         assert!(read_slice(b"hi", -3, 4).eq(&b"hi"[..]));
     }
 
+    /// Write past EOF zero-fills the hole and round-trips.
     #[test]
     fn write_extends_and_read_back() {
+        let _g = arkfs_test_review::guard();
         let mut v = Vec::new();
         apply_write(&mut v, 2, b"ab");
         assert_eq!(v, b"\0\0ab");
         assert_eq!(read_slice(&v, 2, 2), b"ab");
+    }
+
+    /// Empty buffer, size 0, offset == len, negative write, empty payload.
+    #[test]
+    fn read_write_empty_and_edges() {
+        let _g = arkfs_test_review::guard();
+        assert!(read_slice(b"", 0, 4).is_empty());
+        assert!(read_slice(b"ab", 0, 0).is_empty());
+        assert!(read_slice(b"ab", 2, 1).is_empty());
+        assert_eq!(read_slice(b"ab", 1, 8), b"b");
+        let mut v = b"xy".to_vec();
+        apply_write(&mut v, -1, b"Z");
+        assert_eq!(v, b"Zy");
+        let mut v = Vec::new();
+        apply_write(&mut v, 0, b"");
+        assert!(v.is_empty());
+        apply_write(&mut v, 0, b"A");
+        assert_eq!(v, b"A");
     }
 }
 
@@ -52,6 +78,7 @@ mod tests {
 mod kani_proofs {
     use super::*;
 
+    /// Kani: write then read at the same offset returns the payload.
     #[kani::proof]
     #[kani::unwind(16)]
     fn write_then_read_returns_payload() {
@@ -66,6 +93,7 @@ mod kani_proofs {
         assert_eq!(read_slice(&data, off as i64, buf.len() as u32), &buf);
     }
 
+    /// Kani: negative read offset is treated as 0.
     #[kani::proof]
     #[kani::unwind(8)]
     fn negative_offset_reads_from_zero() {

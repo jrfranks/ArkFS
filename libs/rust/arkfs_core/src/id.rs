@@ -10,6 +10,9 @@ use std::fmt;
 
 const HEX: &[u8; 16] = b"0123456789abcdef";
 
+/// POSIX `NAME_MAX`: one path component, in bytes (UTF-8).
+pub const NAME_MAX: usize = 255;
+
 /// Content-addressed object identifier (BLAKE3-256 of the payload bytes).
 ///
 /// Two identical payloads share an id (dedup). `from_labeled` is for domain
@@ -34,6 +37,7 @@ impl ObjectId {
         ObjectId(*blake3::keyed_hash(&key, data).as_bytes())
     }
 
+    /// Raw 32-byte BLAKE3 digest.
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
@@ -62,6 +66,7 @@ impl ObjectId {
     }
 }
 
+/// One ASCII hex digit → 0..15.
 fn hex_nibble(c: u8) -> Result<u8, ArkError> {
     match c {
         b'0'..=b'9' => Ok(c - b'0'),
@@ -72,12 +77,14 @@ fn hex_nibble(c: u8) -> Result<u8, ArkError> {
 }
 
 impl fmt::Debug for ObjectId {
+    /// Debug prints ObjectId(<first 16 hex chars>).
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "ObjectId({})", &self.to_hex()[..16])
     }
 }
 
 impl fmt::Display for ObjectId {
+    /// Display is the full 64-char lowercase hex.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.to_hex())
     }
@@ -96,10 +103,12 @@ impl fmt::Display for ObjectId {
 pub struct PathKey(pub String);
 
 impl PathKey {
+    /// Canonical `/`.
     pub fn root() -> Self {
         PathKey("/".into())
     }
 
+    /// True only for `/`.
     pub fn is_root(&self) -> bool {
         self.0 == "/"
     }
@@ -128,6 +137,9 @@ impl PathKey {
             if part == "." || part == ".." {
                 return Err(ArkError::invalid_argument("path must not contain . or .."));
             }
+            if part.len() > NAME_MAX {
+                return Err(ArkError::name_too_long(part));
+            }
             parts.push(part);
         }
         if parts.is_empty() {
@@ -138,6 +150,7 @@ impl PathKey {
         Ok(PathKey(out))
     }
 
+    /// Canonical path string (always starts with `/`).
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -172,10 +185,43 @@ impl PathKey {
         {
             return Err(ArkError::invalid_argument("invalid path component"));
         }
+        if name.len() > NAME_MAX {
+            return Err(ArkError::name_too_long(name));
+        }
         if self.is_root() {
             PathKey::parse(format!("/{name}"))
         } else {
             PathKey::parse(format!("{}/{name}", self.0))
+        }
+    }
+
+    /// True if `self` is `prefix` or a descendant (`prefix/...`).
+    pub fn is_under(&self, prefix: &PathKey) -> bool {
+        if self == prefix {
+            return true;
+        }
+        if prefix.is_root() {
+            return !self.is_root();
+        }
+        self.as_str().starts_with(&format!("{}/", prefix.as_str()))
+    }
+
+    /// Rewrite `from` (or `from/...`) to `to` (or `to/...`). `None` if not under `from`.
+    pub fn rebase(&self, from: &PathKey, to: &PathKey) -> Option<PathKey> {
+        if self == from {
+            return Some(to.clone());
+        }
+        let rest = if from.is_root() {
+            self.as_str().strip_prefix('/')?
+        } else {
+            self.as_str()
+                .strip_prefix(from.as_str())?
+                .strip_prefix('/')?
+        };
+        if to.is_root() {
+            PathKey::parse(format!("/{rest}")).ok()
+        } else {
+            PathKey::parse(format!("{}/{rest}", to.as_str())).ok()
         }
     }
 
@@ -202,6 +248,7 @@ impl PathKey {
 pub struct OwnerId(pub String);
 
 impl OwnerId {
+    /// Opaque owner string (unused by single-node FUSE).
     pub fn new(id: impl Into<String>) -> Self {
         OwnerId(id.into())
     }
@@ -210,9 +257,15 @@ impl OwnerId {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[allow(unused_imports)]
+    use arkfs_test_review::{
+        review_assert as assert, review_eq as assert_eq, review_ne as assert_ne,
+    };
 
+    /// Same bytes → same id; hex round-trips; length 64.
     #[test]
     fn object_id_is_deterministic() {
+        let _g = arkfs_test_review::guard();
         let a = ObjectId::from_bytes(b"hello");
         let b = ObjectId::from_bytes(b"hello");
         let c = ObjectId::from_bytes(b"world");
@@ -222,8 +275,10 @@ mod tests {
         assert_eq!(ObjectId::from_hex(&a.to_hex()).unwrap(), a);
     }
 
+    /// parse/join/parent/immediate_child/is_under/rebase invariants.
     #[test]
     fn path_parse_and_join() {
+        let _g = arkfs_test_review::guard();
         let p = PathKey::parse("/a/b/c").unwrap();
         assert_eq!(p.as_str(), "/a/b/c");
         assert_eq!(p.name(), "c");
@@ -259,10 +314,59 @@ mod tests {
         assert!(PathKey::parse("rel").is_err());
         assert!(PathKey::parse("/a/../b").is_err());
         assert_eq!(PathKey::parse("/a//b/").unwrap().as_str(), "/a/b");
+        let a = PathKey::parse("/a").unwrap();
+        let ax = PathKey::parse("/a/x").unwrap();
+        let b = PathKey::parse("/b").unwrap();
+        assert!(ax.is_under(&a));
+        assert!(a.is_under(&a));
+        assert!(!PathKey::parse("/ab").unwrap().is_under(&a));
+        assert_eq!(ax.rebase(&a, &b).unwrap().as_str(), "/b/x");
+        assert_eq!(a.rebase(&a, &b).unwrap().as_str(), "/b");
+        assert!(PathKey::parse("/z").unwrap().rebase(&a, &b).is_none());
     }
 
+    /// Empty, NUL, `.` / `..`, join component rules, root parent, hex length/digits.
+    #[test]
+    fn path_and_hex_boundaries() {
+        let _g = arkfs_test_review::guard();
+        assert!(PathKey::parse("").is_err());
+        assert!(PathKey::parse("/a/\0b").is_err());
+        assert!(PathKey::parse("/a/./b").is_err());
+        assert!(PathKey::root().parent().is_none());
+        assert_eq!(PathKey::root().name(), "/");
+        assert!(PathKey::root().is_under(&PathKey::root()));
+        let a = PathKey::parse("/a").unwrap();
+        assert_eq!(
+            a.rebase(&PathKey::root(), &PathKey::parse("/b").unwrap())
+                .unwrap()
+                .as_str(),
+            "/b/a"
+        );
+        for bad in ["", ".", "..", "a/b", "a\0"] {
+            assert!(PathKey::root().join(bad).is_err(), "join {bad:?}");
+        }
+        let long = "a".repeat(NAME_MAX);
+        assert!(PathKey::root().join(&long).is_ok());
+        let too = "a".repeat(NAME_MAX + 1);
+        assert!(matches!(
+            PathKey::root().join(&too).unwrap_err(),
+            ArkError::NameTooLong { .. }
+        ));
+        assert!(matches!(
+            PathKey::parse(format!("/{too}")).unwrap_err(),
+            ArkError::NameTooLong { .. }
+        ));
+        assert!(ObjectId::from_hex("").is_err());
+        assert!(ObjectId::from_hex(&"ab".repeat(31)).is_err());
+        assert!(ObjectId::from_hex(&"g".repeat(64)).is_err());
+        let id = ObjectId::from_bytes(b"x");
+        assert_eq!(ObjectId::from_hex(&id.to_hex().to_uppercase()).unwrap(), id);
+    }
+
+    /// Labeled ids differ from raw and from length-prefix confusion.
     #[test]
     fn labeled_differs_from_raw_and_uses_key_derivation() {
+        let _g = arkfs_test_review::guard();
         let raw = ObjectId::from_bytes(b"data");
         let labeled = ObjectId::from_labeled(b"attr", b"data");
         assert_ne!(raw, labeled);

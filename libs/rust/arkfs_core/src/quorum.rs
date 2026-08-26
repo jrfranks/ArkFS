@@ -39,15 +39,23 @@ impl QuorumPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[allow(unused_imports)]
+    use arkfs_test_review::{
+        review_assert as assert, review_eq as assert_eq, review_ne as assert_ne,
+    };
 
+    /// OwnerOnly is satisfied by the local write alone.
     #[test]
     fn owner_only_needs_one() {
+        let _g = arkfs_test_review::guard();
         assert_eq!(QuorumPolicy::OwnerOnly.required_acks(5), 1);
         assert!(QuorumPolicy::OwnerOnly.is_satisfied(1, 5));
     }
 
+    /// AllAlwaysOn needs every reachable replica including local.
     #[test]
     fn all_always_on_tracks_live_set() {
+        let _g = arkfs_test_review::guard();
         assert_eq!(QuorumPolicy::AllAlwaysOn.required_acks(3), 3);
         assert!(!QuorumPolicy::AllAlwaysOn.is_satisfied(2, 3));
     }

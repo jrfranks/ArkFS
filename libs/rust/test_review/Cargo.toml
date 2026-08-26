@@ -1,0 +1,10 @@
+# Dev-only. Production crates must not depend on this (arkfs_core stays I/O-free).
+[package]
+name = "arkfs_test_review"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "NDJSON test logs for automated review of cargo/mix test runs"
+
+[lints]
+workspace = true

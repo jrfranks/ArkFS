@@ -1,0 +1,17 @@
+#!/bin/sh
+# Full local bar before a push reaches a remote: package tests, clippy, Kani,
+# Miri, llvm-cov, live FUSE. GitHub Actions does not run this (`make ci` only).
+# Bypass: git push --no-verify  or  ARKFS_SKIP_PREPUSH=1 (emergency only).
+# ARKFS_SKIP_PRECOMMIT=1 is accepted as an alias. POSIX sh; do not assume bash.
+#
+# This hook only runs `make prepush`. Tool install is `make setup` /
+# post-checkout / post-merge — not here (avoids installing Kani twice per push).
+
+if [ "${ARKFS_SKIP_PREPUSH:-}" = 1 ] || [ "${ARKFS_SKIP_PRECOMMIT:-}" = 1 ]; then
+	echo "skipping full pre-push suite" >&2
+	exit 0
+fi
+
+root=$(git rev-parse --show-toplevel) || exit 1
+cd "$root" || exit 1
+exec make prepush

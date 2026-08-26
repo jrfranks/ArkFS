@@ -21,10 +21,12 @@ pub struct Timespec {
 }
 
 impl Timespec {
+    /// Timespec from whole seconds + nsec.
     pub fn new(sec: i64, nsec: u32) -> Self {
         Timespec { sec, nsec }
     }
 
+    /// Split a nanosecond count into sec/nsec.
     pub fn from_nanos(nanos: u64) -> Self {
         Timespec {
             sec: (nanos / 1_000_000_000) as i64,
@@ -32,6 +34,7 @@ impl Timespec {
         }
     }
 
+    /// sec*1e9 + nsec, saturating, negative sec as 0.
     pub fn as_nanos(self) -> u64 {
         (self.sec.max(0) as u64)
             .saturating_mul(1_000_000_000)
@@ -248,6 +251,7 @@ pub struct FileAttributes {
 }
 
 impl Default for FileAttributes {
+    /// Regular file, mode 644, primary ::$DATA stream, nlink 1.
     fn default() -> Self {
         FileAttributes {
             file_id: 0,
@@ -328,6 +332,7 @@ impl FileAttributes {
         self.ctime = now;
     }
 
+    /// The ::$DATA stream, if present (directories have none).
     pub fn primary_stream_mut(&mut self) -> Option<&mut NamedStream> {
         self.streams
             .iter_mut()
@@ -382,16 +387,24 @@ impl FileAttributes {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[allow(unused_imports)]
+    use arkfs_test_review::{
+        review_assert as assert, review_eq as assert_eq, review_ne as assert_ne,
+    };
 
+    /// Default FileAttributes includes the primary data stream.
     #[test]
     fn default_has_primary_stream() {
+        let _g = arkfs_test_review::guard();
         let a = FileAttributes::default();
         assert_eq!(a.streams.len(), 1);
         assert_eq!(a.streams[0].name, NamedStream::PRIMARY);
     }
 
+    /// GrowAllocation setattr size grows allocation_size.
     #[test]
     fn apply_posix_grows_allocation() {
+        let _g = arkfs_test_review::guard();
         let mut a = FileAttributes::new_file(1, 0o644);
         a.apply_posix(
             &PosixPatch {
@@ -408,8 +421,10 @@ mod tests {
         assert_eq!(a.streams[0].size, 100);
     }
 
+    /// touch_change bumps change_attr and ctime.
     #[test]
     fn touch_change_increments() {
+        let _g = arkfs_test_review::guard();
         let mut a = FileAttributes::new_file(1, 0o644);
         a.touch_change(Timespec::new(100, 0));
         assert_eq!(a.change_attr, 1);

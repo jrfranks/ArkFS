@@ -23,6 +23,7 @@ impl Timestamp {
         wall_nanos: 0,
     };
 
+    /// Timestamp from logical tick + wall nanos.
     pub fn new(logical: u64, wall_nanos: u64) -> Self {
         Timestamp {
             logical,
@@ -55,17 +56,25 @@ impl Timestamp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[allow(unused_imports)]
+    use arkfs_test_review::{
+        review_assert as assert, review_eq as assert_eq, review_ne as assert_ne,
+    };
 
+    /// tick always increments logical.
     #[test]
     fn tick_advances_logical() {
+        let _g = arkfs_test_review::guard();
         let t0 = Timestamp::new(1, 100);
         let t1 = t0.tick(200);
         assert_eq!(t1.logical, 2);
         assert_eq!(t1.wall_nanos, 200);
     }
 
+    /// merge takes componentwise max then ticks.
     #[test]
     fn merge_takes_max_and_ticks() {
+        let _g = arkfs_test_review::guard();
         let a = Timestamp::new(5, 10);
         let b = Timestamp::new(3, 50);
         let m = a.merge(b);
@@ -73,8 +82,10 @@ mod tests {
         assert_eq!(m.wall_nanos, 50);
     }
 
+    /// Timestamp ↔ Timespec via wall_nanos.
     #[test]
     fn timespec_bridge() {
+        let _g = arkfs_test_review::guard();
         let ts = Timestamp::new(1, 1_500_000_000);
         let wall = ts.to_timespec();
         assert_eq!(wall.sec, 1);

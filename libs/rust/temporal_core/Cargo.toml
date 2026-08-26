@@ -12,3 +12,4 @@ persistent_object_store = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+arkfs_test_review = { workspace = true }

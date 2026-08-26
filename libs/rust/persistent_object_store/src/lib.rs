@@ -23,14 +23,10 @@
 //! [`ReplicationBackend`] is the cross-node comms hook. The local write always
 //! counts as 1 ack (`require_quorum`). Remotes are extra.
 //!
+//! - [`NoPeers`]: `replicate_*` → 0, `always_on_count` → 0, no replica dirs.
+//!   Use [`open_isolated_store`] for single-node FUSE.
 //! - [`LocalQuorum`]: writes extra directories (cluster *simulation*).
 //! - [`open_local_quorum_store`]: first name is primary, `skip(1)` are remotes.
-//!   A one-element list therefore has **zero remotes** — implicit isolation.
-//!
-//! Single-node FUSE must behave as if **no peers exist**. Prefer an explicit
-//! backend whose `replicate_*` returns 0 and `always_on_count` is 0, and which
-//! never creates `replicas/`. Do not treat an empty `LocalQuorum` as that
-//! contract unless you are only writing harness tests.
 //!
 //! Onboarding: `docs/maintainer.md` (safe-write + isolation sections).
 
@@ -49,15 +45,16 @@ pub struct IntegrityReport {
 }
 
 impl IntegrityReport {
+    /// True when the scan found no checksum failures.
     pub fn ok(&self) -> bool {
         self.failures.is_empty()
     }
 }
 
-/// Backend for quorum replication. Phase 0 ships [`LocalQuorum`].
+/// Backend for quorum replication.
 ///
-/// Return values are **remote** acks only (not including local). Isolated
-/// implementations return `Ok(0)` and `always_on_count() == 0`.
+/// Return values are **remote** acks only (not including local). [`NoPeers`]
+/// returns `Ok(0)` and `always_on_count() == 0`.
 pub trait ReplicationBackend: Send + Sync {
     /// Replicate object bytes to peers. Returns successful remote acks.
     fn replicate_object(&self, id: &ObjectId, data: &[u8]) -> Result<u32, ArkError>;
@@ -67,6 +64,31 @@ pub trait ReplicationBackend: Send + Sync {
 
     /// Currently reachable remote replicas (not including the local primary).
     fn always_on_count(&self) -> u32;
+}
+
+/// Zero remote peers. Never creates `replicas/` and never iterates a peer list.
+pub struct NoPeers;
+
+impl ReplicationBackend for NoPeers {
+    /// NoPeers: zero remote acks, no I/O.
+    fn replicate_object(&self, _: &ObjectId, _: &[u8]) -> Result<u32, ArkError> {
+        Ok(0)
+    }
+
+    /// NoPeers: zero remote acks, no I/O.
+    fn replicate_anchor(&self, _: &str, _: &[u8; 32]) -> Result<u32, ArkError> {
+        Ok(0)
+    }
+
+    /// NoPeers: no reachable remotes.
+    fn always_on_count(&self) -> u32 {
+        0
+    }
+}
+
+/// Primary at `base/primary`. No replica directories, no peer I/O.
+pub fn open_isolated_store(base: impl AsRef<Path>) -> Result<PersistentObjectStore, ArkError> {
+    PersistentObjectStore::open(base.as_ref().join("primary"), Box::new(NoPeers))
 }
 
 /// In-process replica directories simulating cluster peers of the primary.
@@ -79,6 +101,7 @@ pub struct LocalQuorum {
 }
 
 impl LocalQuorum {
+    /// Create replica objects/ and anchors/ dirs.
     pub fn new(replica_dirs: Vec<(String, PathBuf)>) -> Result<Self, ArkError> {
         for (_, p) in &replica_dirs {
             fs::create_dir_all(p.join("objects")).map_err(ArkError::from)?;
@@ -90,14 +113,17 @@ impl LocalQuorum {
         })
     }
 
+    /// Simulate partition: later replicate_* skip this replica.
     pub fn lose_node(&self, node_id: &str) {
         self.lost.lock().unwrap().insert(node_id.to_string());
     }
 
+    /// Undo lose_node.
     pub fn restore_node(&self, node_id: &str) {
         self.lost.lock().unwrap().remove(node_id);
     }
 
+    /// Run `write` on every replica that is not lost; count successes.
     fn acks(&self, write: impl Fn(&Path) -> Result<(), ArkError>) -> u32 {
         let lost = self.lost.lock().unwrap().clone();
         let mut acks = 0u32;
@@ -114,6 +140,7 @@ impl LocalQuorum {
 }
 
 impl ReplicationBackend for LocalQuorum {
+    /// Safe-write the object into each reachable replica directory.
     fn replicate_object(&self, id: &ObjectId, data: &[u8]) -> Result<u32, ArkError> {
         Ok(self.acks(|dir| {
             write_fsync(
@@ -123,10 +150,12 @@ impl ReplicationBackend for LocalQuorum {
         }))
     }
 
+    /// Safe-write the 32-byte anchor into each reachable replica.
     fn replicate_anchor(&self, name: &str, id_bytes: &[u8; 32]) -> Result<u32, ArkError> {
         Ok(self.acks(|dir| write_fsync(&dir.join("anchors").join(name), id_bytes)))
     }
 
+    /// Replicas that are not currently marked lost.
     fn always_on_count(&self) -> u32 {
         let lost = self.lost.lock().unwrap();
         self.replica_dirs
@@ -143,6 +172,7 @@ pub struct PersistentObjectStore {
 }
 
 impl PersistentObjectStore {
+    /// Create objects/ and anchors/ under `root`; take the replication backend.
     pub fn open(
         root: impl Into<PathBuf>,
         backend: Box<dyn ReplicationBackend>,
@@ -197,7 +227,34 @@ impl PersistentObjectStore {
         Ok(data)
     }
 
-    /// Scan every `*.obj` under `objects/` and re-hash. Used by FUSE `statfs`.
+    /// Store root (`objects/` and `anchors/` live under this).
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// Count of published `*.obj` files and their total size in bytes.
+    ///
+    /// Staging `*.tmp` is ignored. Used by FUSE `statfs` (not a checksum scan).
+    pub fn usage(&self) -> Result<(u64, u64), ArkError> {
+        let dir = self.root.join("objects");
+        let mut count = 0u64;
+        let mut bytes = 0u64;
+        if !dir.exists() {
+            return Ok((0, 0));
+        }
+        for entry in fs::read_dir(&dir).map_err(ArkError::from)? {
+            let entry = entry.map_err(ArkError::from)?;
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("obj") {
+                continue;
+            }
+            count = count.saturating_add(1);
+            bytes = bytes.saturating_add(entry.metadata().map_err(ArkError::from)?.len());
+        }
+        Ok((count, bytes))
+    }
+
+    /// Scan every `*.obj` under `objects/` and re-hash.
     pub fn verify_integrity(&self) -> Result<IntegrityReport, ArkError> {
         let dir = self.root.join("objects");
         let mut report = IntegrityReport {
@@ -276,12 +333,14 @@ impl PersistentObjectStore {
         }
     }
 
+    /// primary/objects/<hex>.obj
     pub fn object_path(&self, id: &ObjectId) -> PathBuf {
         self.root
             .join("objects")
             .join(format!("{}.obj", id.to_hex()))
     }
 
+    /// primary/anchors/<name>
     pub fn anchor_path(&self, name: &str) -> PathBuf {
         self.root.join("anchors").join(name)
     }
@@ -385,9 +444,15 @@ pub fn open_local_quorum_store(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[allow(unused_imports)]
+    use arkfs_test_review::{
+        review_assert as assert, review_eq as assert_eq, review_ne as assert_ne,
+    };
 
+    /// put then get returns the same bytes.
     #[test]
     fn store_and_get_roundtrip() {
+        let _g = arkfs_test_review::guard();
         let dir = tempfile::tempdir().unwrap();
         let store = open_local_quorum_store(dir.path(), &["n0", "n1", "n2"]).unwrap();
         let data = b"hello arkfs";
@@ -398,8 +463,10 @@ mod tests {
         assert!(report.ok(), "{:?}", report.failures);
     }
 
+    /// CAS: two puts of the same bytes share ObjectId.
     #[test]
     fn identical_payloads_share_id() {
+        let _g = arkfs_test_review::guard();
         let dir = tempfile::tempdir().unwrap();
         let store = open_local_quorum_store(dir.path(), &["n0", "n1"]).unwrap();
         let a = store.put(b"same", QuorumPolicy::Quorum(2)).unwrap();
@@ -407,8 +474,10 @@ mod tests {
         assert_eq!(a, b);
     }
 
+    /// Quorum(2) with no remotes must not publish the object name.
     #[test]
     fn quorum_fails_closed_without_publishing() {
+        let _g = arkfs_test_review::guard();
         let dir = tempfile::tempdir().unwrap();
         let backend = LocalQuorum::new(vec![
             ("n1".into(), dir.path().join("replicas/n1")),
@@ -426,8 +495,10 @@ mod tests {
         assert!(matches!(store.get(&id), Err(ArkError::NotFound { .. })));
     }
 
+    /// Corrupting an object file makes get and integrity_scan fail.
     #[test]
     fn bit_flip_detected_on_get_and_scan() {
+        let _g = arkfs_test_review::guard();
         let dir = tempfile::tempdir().unwrap();
         let store = open_local_quorum_store(dir.path(), &["n0", "n1"]).unwrap();
         let data = b"integrity-me";
@@ -441,24 +512,74 @@ mod tests {
         assert!(!report.ok());
     }
 
+    /// OwnerOnly publishes with only the local write.
     #[test]
     fn owner_only_succeeds_with_single_node() {
+        let _g = arkfs_test_review::guard();
         let dir = tempfile::tempdir().unwrap();
         let store = open_local_quorum_store(dir.path(), &["owner"]).unwrap();
         let id = store.put(b"solo", QuorumPolicy::OwnerOnly).unwrap();
         assert_eq!(store.get(&id).unwrap(), b"solo");
     }
 
+    /// usage counts published `*.obj` bytes and ignores missing dirs.
+    #[test]
+    fn usage_counts_objects_not_tmp() {
+        let _g = arkfs_test_review::guard();
+        let dir = tempfile::tempdir().unwrap();
+        let store = open_isolated_store(dir.path()).unwrap();
+        assert_eq!(store.usage().unwrap(), (0, 0));
+        let data = vec![7u8; 100];
+        store.put(&data, QuorumPolicy::OwnerOnly).unwrap();
+        let (count, bytes) = store.usage().unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(bytes, 100);
+        assert!(store.root().ends_with("primary"));
+    }
+
+    /// NoPeers + OwnerOnly/AllAlwaysOn succeed; no replicas/ dir.
+    #[test]
+    fn isolated_owner_only_and_all_always_on() {
+        let _g = arkfs_test_review::guard();
+        let dir = tempfile::tempdir().unwrap();
+        let store = open_isolated_store(dir.path()).unwrap();
+        let id = store.put(b"solo", QuorumPolicy::OwnerOnly).unwrap();
+        assert_eq!(store.get(&id).unwrap(), b"solo");
+        store
+            .set_anchor("temporal_index", &id, QuorumPolicy::AllAlwaysOn)
+            .unwrap();
+        assert!(!dir.path().join("replicas").exists());
+        assert!(store
+            .object_path(&id)
+            .starts_with(dir.path().join("primary")));
+    }
+
+    /// NoPeers + Quorum(2) fails closed.
+    #[test]
+    fn isolated_quorum_two_fails_closed() {
+        let _g = arkfs_test_review::guard();
+        let dir = tempfile::tempdir().unwrap();
+        let store = open_isolated_store(dir.path()).unwrap();
+        let err = store.put(b"x", QuorumPolicy::Quorum(2)).unwrap_err();
+        assert!(matches!(err, ArkError::Quorum { got: 1, need: 2 }));
+        assert!(!store.object_path(&ObjectId::from_bytes(b"x")).exists());
+        assert!(!dir.path().join("replicas").exists());
+    }
+
+    /// Staging path is a sibling .tmp of the object name.
     #[test]
     fn staging_names_are_per_filename() {
+        let _g = arkfs_test_review::guard();
         let obj = PathBuf::from("/objects/abc.obj");
         let meta = PathBuf::from("/objects/abc.meta");
         assert_ne!(sibling_tmp(&obj), sibling_tmp(&meta));
         assert_eq!(sibling_tmp(&obj).file_name().unwrap(), "abc.obj.tmp");
     }
 
+    /// set_anchor then get_anchor returns the same ObjectId.
     #[test]
     fn anchor_roundtrip() {
+        let _g = arkfs_test_review::guard();
         let dir = tempfile::tempdir().unwrap();
         let store = open_local_quorum_store(dir.path(), &["n0", "n1"]).unwrap();
         let id = store.put(b"idx", QuorumPolicy::Quorum(1)).unwrap();
@@ -466,5 +587,13 @@ mod tests {
             .set_anchor("temporal_index", &id, QuorumPolicy::Quorum(1))
             .unwrap();
         assert_eq!(store.get_anchor("temporal_index").unwrap(), Some(id));
+    }
+
+    /// ENOSPC (errno 28) maps to ArkError::NoSpace, not a generic Io.
+    #[test]
+    fn enospc_is_no_space() {
+        let _g = arkfs_test_review::guard();
+        let e = std::io::Error::from_raw_os_error(28);
+        assert!(matches!(ArkError::from(e), ArkError::NoSpace { .. }));
     }
 }

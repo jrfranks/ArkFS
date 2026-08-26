@@ -9,6 +9,8 @@
 
 use arkfs_core::attr_map::FuseSetAttr;
 use arkfs_core::{ArkError, FileType};
+#[allow(unused_imports)]
+use arkfs_test_review::{review_assert as assert, review_eq as assert_eq, review_ne as assert_ne};
 use fuse_facade::{
     all_errno_pairs, apply_write, fuse_kind, fuse_name, read_slice, sized, to_errno, ArkSession,
     SizedBytes, IMPLEMENTED_FUSE_OPS,
@@ -18,12 +20,14 @@ use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use tempfile::tempdir;
 
+/// Fresh isolated ArkSession for GitHub-safe tests (no /dev/fuse).
 fn sess() -> (tempfile::TempDir, ArkSession) {
     let d = tempdir().unwrap();
     let s = ArkSession::mount_store(d.path(), None).unwrap();
     (d, s)
 }
 
+/// create_file at root; returns (ino, fh) already open O_RDWR.
 fn create(s: &ArkSession, name: &str) -> (u64, u64) {
     let (h, fh) = s
         .create_file(FUSE_ROOT_ID, name, 0o644, 0, 0, libc::O_RDWR)
@@ -31,8 +35,10 @@ fn create(s: &ArkSession, name: &str) -> (u64, u64) {
     (h.attrs.file_id, fh)
 }
 
+/// IMPLEMENTED_FUSE_OPS contains every named kernel op we claim.
 #[test]
 fn reachability_contract_lists_adapter_surface() {
+    let _g = arkfs_test_review::guard();
     for op in [
         "init",
         "destroy",
@@ -72,6 +78,8 @@ fn reachability_contract_lists_adapter_surface() {
         "poll",
         "fallocate",
         "lseek",
+        "copy_file_range",
+        "readdirplus",
     ] {
         assert!(
             IMPLEMENTED_FUSE_OPS.contains(&op),
@@ -80,21 +88,38 @@ fn reachability_contract_lists_adapter_surface() {
     }
 }
 
+/// lookup finds mkdir'd dir; `.` `..` and slash names are EINVAL/not-found.
 #[test]
 fn fuse_lookup() {
+    let _g = arkfs_test_review::guard();
     let (_d, s) = sess();
-    s.mkdir(FUSE_ROOT_ID, "d", 0o755, 1, 2).unwrap();
-    let h = s.lookup(FUSE_ROOT_ID, "d").unwrap();
+    s.mkdir(FUSE_ROOT_ID, "d", 0o755, 0, 0).unwrap();
+    let h = s.lookup(FUSE_ROOT_ID, "d", 0, 0).unwrap();
+    s.setattr(
+        h.attrs.file_id,
+        FuseSetAttr {
+            uid: Some(1),
+            gid: Some(2),
+            ..Default::default()
+        },
+        None,
+        0,
+        0,
+    )
+    .unwrap();
+    let h = s.lookup(FUSE_ROOT_ID, "d", 0, 0).unwrap();
     assert_eq!(h.attrs.file_type, FileType::Directory);
     assert_eq!(h.attrs.uid, 1);
-    assert!(s.lookup(FUSE_ROOT_ID, "nope").is_err());
-    assert!(s.lookup(FUSE_ROOT_ID, ".").is_err());
-    assert!(s.lookup(FUSE_ROOT_ID, "..").is_err());
-    assert!(s.lookup(FUSE_ROOT_ID, "a/b").is_err());
+    assert!(s.lookup(FUSE_ROOT_ID, "nope", 0, 0).is_err());
+    assert!(s.lookup(FUSE_ROOT_ID, ".", 0, 0).is_err());
+    assert!(s.lookup(FUSE_ROOT_ID, "..", 0, 0).is_err());
+    assert!(s.lookup(FUSE_ROOT_ID, "a/b", 0, 0).is_err());
 }
 
+/// Root getattr is inode 1 directory; unknown ino fails.
 #[test]
 fn fuse_getattr() {
+    let _g = arkfs_test_review::guard();
     let (_d, s) = sess();
     let a = s.getattr(FUSE_ROOT_ID, None).unwrap();
     assert_eq!(a.ino, FUSE_ROOT_ID);
@@ -102,8 +127,10 @@ fn fuse_getattr() {
     assert!(s.getattr(999_999, None).is_err());
 }
 
+/// setattr patches mode/uid/gid/size without clobbering other fields.
 #[test]
 fn fuse_setattr_mode_uid_gid_size_times() {
+    let _g = arkfs_test_review::guard();
     let (_d, s) = sess();
     let (ino, fh) = create(&s, "s");
     s.release(fh).unwrap();
@@ -120,6 +147,8 @@ fn fuse_setattr_mode_uid_gid_size_times() {
                 ctime: None,
             },
             None,
+            0,
+            0,
         )
         .unwrap();
     assert_eq!(a.perm, 0o640);
@@ -128,8 +157,10 @@ fn fuse_setattr_mode_uid_gid_size_times() {
     assert_eq!(a.size, 4);
 }
 
+/// Truncate through an open fh is visible on that fh and after fsync.
 #[test]
 fn fuse_setattr_size_via_open_fh() {
+    let _g = arkfs_test_review::guard();
     let (_d, s) = sess();
     let (ino, fh) = create(&s, "t");
     s.write(fh, 0, b"abcdef").unwrap();
@@ -140,35 +171,44 @@ fn fuse_setattr_size_via_open_fh() {
             ..Default::default()
         },
         Some(fh),
+        0,
+        0,
     )
     .unwrap();
     let a = s.getattr(ino, Some(fh)).unwrap();
     assert_eq!(a.size, 3);
     s.fsync(fh).unwrap();
     s.release(fh).unwrap();
-    let fh = s.open(ino, libc::O_RDONLY).unwrap();
+    let fh = s.open(ino, libc::O_RDONLY, 0, 0).unwrap();
     assert_eq!(s.read(fh, 0, 10).unwrap(), b"abc");
 }
 
+/// Nested mkdir; second mkdir of the same name is AlreadyExists.
 #[test]
 fn fuse_mkdir() {
+    let _g = arkfs_test_review::guard();
     let (_d, s) = sess();
     s.mkdir(FUSE_ROOT_ID, "a", 0o755, 0, 0).unwrap();
     s.mkdir(
-        s.lookup(FUSE_ROOT_ID, "a").unwrap().attrs.file_id,
+        s.lookup(FUSE_ROOT_ID, "a", 0, 0).unwrap().attrs.file_id,
         "b",
         0o700,
         0,
         0,
     )
     .unwrap();
-    assert_eq!(s.lookup(FUSE_ROOT_ID, "a").unwrap().path.as_str(), "/a");
+    assert_eq!(
+        s.lookup(FUSE_ROOT_ID, "a", 0, 0).unwrap().path.as_str(),
+        "/a"
+    );
     let err = s.mkdir(FUSE_ROOT_ID, "a", 0o755, 0, 0).unwrap_err();
     assert!(matches!(err, ArkError::AlreadyExists { .. }));
 }
 
+/// create/write/fsync/read/O_RDONLY write is ReadOnly.
 #[test]
 fn fuse_create_open_read_write_flush_fsync_release() {
+    let _g = arkfs_test_review::guard();
     let (_d, s) = sess();
     let (ino, fh) = create(&s, "f");
     assert_eq!(s.write(fh, 0, b"hello").unwrap(), 5);
@@ -176,7 +216,7 @@ fn fuse_create_open_read_write_flush_fsync_release() {
     s.fsync(fh).unwrap();
     s.fsync(fh).unwrap();
     s.release(fh).unwrap();
-    let fh = s.open(ino, libc::O_RDONLY).unwrap();
+    let fh = s.open(ino, libc::O_RDONLY, 0, 0).unwrap();
     assert_eq!(s.read(fh, 0, 5).unwrap(), b"hello");
     assert_eq!(s.read(fh, 3, 8).unwrap(), b"lo");
     assert!(s.read(fh, 50, 2).unwrap().is_empty());
@@ -186,77 +226,89 @@ fn fuse_create_open_read_write_flush_fsync_release() {
     s.release(fh).unwrap();
 }
 
+/// Write at offset 4 makes a hole; O_TRUNC discards it.
 #[test]
 fn fuse_write_hole_and_o_trunc() {
+    let _g = arkfs_test_review::guard();
     let (_d, s) = sess();
     let (ino, fh) = create(&s, "h");
     s.write(fh, 4, b"Z").unwrap();
     s.fsync(fh).unwrap();
     s.release(fh).unwrap();
-    let fh = s.open(ino, libc::O_RDWR | libc::O_TRUNC).unwrap();
+    let fh = s.open(ino, libc::O_RDWR | libc::O_TRUNC, 0, 0).unwrap();
     assert_eq!(s.read(fh, 0, 10).unwrap(), b"");
     s.write(fh, 0, b"n").unwrap();
     s.release(fh).unwrap();
-    let fh = s.open(ino, libc::O_RDONLY).unwrap();
+    let fh = s.open(ino, libc::O_RDONLY, 0, 0).unwrap();
     assert_eq!(s.read(fh, 0, 10).unwrap(), b"n");
 }
 
+/// open() on a directory is EISDIR (use opendir).
 #[test]
 fn fuse_open_directory_is_error() {
+    let _g = arkfs_test_review::guard();
     let (_d, s) = sess();
-    let err = s.open(FUSE_ROOT_ID, libc::O_RDONLY).unwrap_err();
+    let err = s.open(FUSE_ROOT_ID, libc::O_RDONLY, 0, 0).unwrap_err();
     assert!(matches!(err, ArkError::IsADirectory { .. }));
 }
 
+/// unlink on dir / rmdir on file / rmdir non-empty fail; then unlink+rmdir.
 #[test]
 fn fuse_unlink_rmdir() {
+    let _g = arkfs_test_review::guard();
     let (_d, s) = sess();
     s.mkdir(FUSE_ROOT_ID, "d", 0o755, 0, 0).unwrap();
-    let dir = s.lookup(FUSE_ROOT_ID, "d").unwrap().attrs.file_id;
+    let dir = s.lookup(FUSE_ROOT_ID, "d", 0, 0).unwrap().attrs.file_id;
     let (_ino, fh) = s.create_file(dir, "x", 0o644, 0, 0, libc::O_RDWR).unwrap();
     s.release(fh).unwrap();
-    let err = s.unlink(FUSE_ROOT_ID, "d").unwrap_err();
+    let err = s.unlink(FUSE_ROOT_ID, "d", 0, 0).unwrap_err();
     assert!(matches!(err, ArkError::IsADirectory { .. }));
-    let err = s.rmdir(dir, "x").unwrap_err();
+    let err = s.rmdir(dir, "x", 0, 0).unwrap_err();
     assert!(matches!(err, ArkError::NotADirectory { .. }));
-    let err = s.rmdir(FUSE_ROOT_ID, "d").unwrap_err();
+    let err = s.rmdir(FUSE_ROOT_ID, "d", 0, 0).unwrap_err();
     assert!(matches!(err, ArkError::NotEmpty { .. }));
-    s.unlink(dir, "x").unwrap();
-    s.rmdir(FUSE_ROOT_ID, "d").unwrap();
-    assert!(s.lookup(FUSE_ROOT_ID, "d").is_err());
+    s.unlink(dir, "x", 0, 0).unwrap();
+    s.rmdir(FUSE_ROOT_ID, "d", 0, 0).unwrap();
+    assert!(s.lookup(FUSE_ROOT_ID, "d", 0, 0).is_err());
 }
 
+/// Rename a file across directories; content follows.
 #[test]
 fn fuse_rename() {
+    let _g = arkfs_test_review::guard();
     let (_d, s) = sess();
     s.mkdir(FUSE_ROOT_ID, "a", 0o755, 0, 0).unwrap();
     s.mkdir(FUSE_ROOT_ID, "b", 0o755, 0, 0).unwrap();
-    let a = s.lookup(FUSE_ROOT_ID, "a").unwrap().attrs.file_id;
-    let b = s.lookup(FUSE_ROOT_ID, "b").unwrap().attrs.file_id;
+    let a = s.lookup(FUSE_ROOT_ID, "a", 0, 0).unwrap().attrs.file_id;
+    let b = s.lookup(FUSE_ROOT_ID, "b", 0, 0).unwrap().attrs.file_id;
     let (_ino, fh) = s.create_file(a, "n", 0o644, 0, 0, libc::O_RDWR).unwrap();
     s.write(fh, 0, b"v").unwrap();
     s.release(fh).unwrap();
-    s.rename(a, "n", b, "m").unwrap();
-    assert!(s.lookup(a, "n").is_err());
-    let m = s.lookup(b, "m").unwrap();
-    let fh = s.open(m.attrs.file_id, libc::O_RDONLY).unwrap();
+    s.rename(a, "n", b, "m", 0, 0, 0).unwrap();
+    assert!(s.lookup(a, "n", 0, 0).is_err());
+    let m = s.lookup(b, "m", 0, 0).unwrap();
+    let fh = s.open(m.attrs.file_id, libc::O_RDONLY, 0, 0).unwrap();
     assert_eq!(s.read(fh, 0, 1).unwrap(), b"v");
 }
 
+/// symlink target round-trips through readlink.
 #[test]
 fn fuse_symlink_readlink() {
+    let _g = arkfs_test_review::guard();
     let (_d, s) = sess();
     let h = s.symlink(FUSE_ROOT_ID, "l", "/target", 0, 0).unwrap();
     assert_eq!(s.readlink(h.attrs.file_id).unwrap(), b"/target");
 }
 
+/// readdir is sorted by name, no `.` / `..`.
 #[test]
 fn fuse_readdir() {
+    let _g = arkfs_test_review::guard();
     let (_d, s) = sess();
     s.mkdir(FUSE_ROOT_ID, "z", 0o755, 0, 0).unwrap();
     s.mkdir(FUSE_ROOT_ID, "a", 0o755, 0, 0).unwrap();
     let names: Vec<_> = s
-        .readdir(FUSE_ROOT_ID)
+        .readdir(FUSE_ROOT_ID, 0, 0)
         .unwrap()
         .into_iter()
         .map(|e| e.name)
@@ -264,12 +316,14 @@ fn fuse_readdir() {
     assert_eq!(names, vec!["a", "z"]);
 }
 
+/// xattr set/get/list/remove and the size=0 protocol.
 #[test]
 fn fuse_xattr_set_get_list_remove_sized() {
+    let _g = arkfs_test_review::guard();
     let (_d, s) = sess();
     let (ino, fh) = create(&s, "x");
     s.release(fh).unwrap();
-    s.setxattr(ino, "user.k", b"val").unwrap();
+    s.setxattr(ino, "user.k", b"val", 0, 0, 0).unwrap();
     assert_eq!(s.getxattr(ino, "user.k").unwrap(), b"val");
     assert_eq!(
         s.getxattr_sized(ino, "user.k", 0).unwrap(),
@@ -290,12 +344,14 @@ fn fuse_xattr_set_get_list_remove_sized() {
         s.listxattr_sized(ino, 0).unwrap(),
         SizedBytes::Size(list.len() as u32)
     );
-    s.removexattr(ino, "user.k").unwrap();
+    s.removexattr(ino, "user.k", 0, 0).unwrap();
     assert!(s.getxattr(ino, "user.k").is_err());
 }
 
+/// Unlink hides the name live; --as-of still reads the old bytes and is read-only.
 #[test]
 fn fuse_never_delete_as_of_and_remount() {
+    let _g = arkfs_test_review::guard();
     let d = tempdir().unwrap();
     let logical = {
         let s = ArkSession::mount_store(d.path(), None).unwrap();
@@ -304,15 +360,15 @@ fn fuse_never_delete_as_of_and_remount() {
             .unwrap();
         s.write(fh, 0, b"old").unwrap();
         s.release(fh).unwrap();
-        let t = s.core.now().logical;
-        s.unlink(FUSE_ROOT_ID, "keep").unwrap();
+        let t = s.logical_now();
+        s.unlink(FUSE_ROOT_ID, "keep", 0, 0).unwrap();
         t
     };
     let live = ArkSession::mount_store(d.path(), None).unwrap();
-    assert!(live.lookup(FUSE_ROOT_ID, "keep").is_err());
+    assert!(live.lookup(FUSE_ROOT_ID, "keep", 0, 0).is_err());
     let hist = ArkSession::mount_store(d.path(), Some(logical)).unwrap();
-    let h = hist.lookup(FUSE_ROOT_ID, "keep").unwrap();
-    let fh = hist.open(h.attrs.file_id, libc::O_RDONLY).unwrap();
+    let h = hist.lookup(FUSE_ROOT_ID, "keep", 0, 0).unwrap();
+    let fh = hist.open(h.attrs.file_id, libc::O_RDONLY, 0, 0).unwrap();
     assert_eq!(hist.read(fh, 0, 3).unwrap(), b"old");
     assert!(matches!(
         hist.mkdir(FUSE_ROOT_ID, "no", 0o755, 0, 0).unwrap_err(),
@@ -320,23 +376,29 @@ fn fuse_never_delete_as_of_and_remount() {
     ));
 }
 
+/// Unknown fh fails read/write/fsync.
 #[test]
 fn fuse_bad_fh_and_ro_mutators() {
+    let _g = arkfs_test_review::guard();
     let (_d, s) = sess();
     assert!(s.read(99, 0, 1).is_err());
     assert!(s.write(99, 0, b"x").is_err());
     assert!(s.fsync(99).is_err());
 }
 
+/// Non-UTF8 OsStr is EINVAL.
 #[test]
 fn fuse_name_rejects_non_utf8() {
+    let _g = arkfs_test_review::guard();
     let bad = OsStr::from_bytes(&[0xff, 0xfe]);
     assert_eq!(fuse_name(bad), Err(libc::EINVAL));
     assert_eq!(fuse_name(OsStr::new("ok")), Ok("ok"));
 }
 
+/// Every FileType maps; errno table is total; io_buf/xattr helpers run.
 #[test]
 fn fuse_kind_and_errno_and_iobuf_are_total() {
+    let _g = arkfs_test_review::guard();
     for t in [
         FileType::File,
         FileType::Directory,
@@ -358,15 +420,20 @@ fn fuse_kind_and_errno_and_iobuf_are_total() {
     assert_eq!(sized(b"zz", 1), SizedBytes::Range);
 }
 
+/// Every Filesystem method in fuse.rs is named in IMPLEMENTED_FUSE_OPS.
 #[test]
 fn fuse_impl_source_matches_reachability_table() {
+    let _g = arkfs_test_review::guard();
     let src = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/fuse.rs"));
     let mut found = Vec::new();
     for line in src.lines() {
         let t = line.trim();
         if let Some(rest) = t.strip_prefix("fn ") {
             let name = rest.split('(').next().unwrap_or("");
-            if matches!(name, "name" | "reply_sized" | "fuse_name" | "mount") {
+            if matches!(
+                name,
+                "name" | "reply_sized" | "fuse_name" | "mount" | "mount_opts" | "spawn"
+            ) {
                 continue;
             }
             found.push(name);
@@ -379,8 +446,10 @@ fn fuse_impl_source_matches_reachability_table() {
     assert!(found.contains(&"lookup") && found.contains(&"readdir"));
 }
 
+/// SpecificTime nanos split into sec/nsec; Now is accepted.
 #[test]
 fn fuse_time_or_now() {
+    let _g = arkfs_test_review::guard();
     use fuse_facade::time_or_now_to_timespec;
     use fuser::TimeOrNow;
     use std::time::{Duration, UNIX_EPOCH};
@@ -390,4 +459,216 @@ fn fuse_time_or_now() {
     assert_eq!(t.sec, 1);
     assert_eq!(t.nsec, 500_000_000);
     let _ = time_or_now_to_timespec(TimeOrNow::Now);
+}
+
+/// Directory rename moves nested files; bytes survive.
+#[test]
+fn fuse_rename_directory_moves_children() {
+    let _g = arkfs_test_review::guard();
+    let (_d, s) = sess();
+    s.mkdir(FUSE_ROOT_ID, "a", 0o755, 0, 0).unwrap();
+    let a = s.lookup(FUSE_ROOT_ID, "a", 0, 0).unwrap().attrs.file_id;
+    s.mkdir(a, "sub", 0o755, 0, 0).unwrap();
+    let sub = s.lookup(a, "sub", 0, 0).unwrap().attrs.file_id;
+    let (_ino, fh) = s.create_file(sub, "x", 0o644, 0, 0, libc::O_RDWR).unwrap();
+    s.write(fh, 0, b"z").unwrap();
+    s.release(fh).unwrap();
+    s.rename(FUSE_ROOT_ID, "a", FUSE_ROOT_ID, "b", 0, 0, 0)
+        .unwrap();
+    assert!(s.lookup(FUSE_ROOT_ID, "a", 0, 0).is_err());
+    let b = s.lookup(FUSE_ROOT_ID, "b", 0, 0).unwrap();
+    let names: Vec<_> = s
+        .readdir(b.attrs.file_id, 0, 0)
+        .unwrap()
+        .into_iter()
+        .map(|e| e.name)
+        .collect();
+    assert_eq!(names, vec!["sub"]);
+    let x = s.lookup(sub, "x", 0, 0).unwrap();
+    let fh = s.open(x.attrs.file_id, libc::O_RDONLY, 0, 0).unwrap();
+    assert_eq!(s.read(fh, 0, 1).unwrap(), b"z");
+    s.release(fh).unwrap();
+}
+
+/// Hard link shares ino; unlink of one name leaves the other with nlink 1.
+#[test]
+fn fuse_link() {
+    let _g = arkfs_test_review::guard();
+    let (_d, s) = sess();
+    let (ino, fh) = create(&s, "a");
+    s.write(fh, 0, b"hi").unwrap();
+    s.release(fh).unwrap();
+    let b = s.link(ino, FUSE_ROOT_ID, "b", 0, 0).unwrap();
+    assert_eq!(b.attrs.file_id, ino);
+    assert_eq!(s.getattr(ino, None).unwrap().nlink, 2);
+    let fh = s.open(ino, libc::O_RDONLY, 0, 0).unwrap();
+    assert_eq!(s.read(fh, 0, 2).unwrap(), b"hi");
+    s.release(fh).unwrap();
+    s.unlink(FUSE_ROOT_ID, "a", 0, 0).unwrap();
+    assert_eq!(s.getattr(ino, None).unwrap().nlink, 1);
+    let fh = s.open(ino, libc::O_RDONLY, 0, 0).unwrap();
+    assert_eq!(s.read(fh, 0, 2).unwrap(), b"hi");
+}
+
+/// mknod regular/fifo/char-device with rdev.
+#[test]
+fn fuse_mknod() {
+    let _g = arkfs_test_review::guard();
+    let (_d, s) = sess();
+    let f = s
+        .mknod(FUSE_ROOT_ID, "reg", libc::S_IFREG | 0o600, 0, 0, 0)
+        .unwrap();
+    assert_eq!(f.attrs.file_type, FileType::File);
+    let p = s
+        .mknod(FUSE_ROOT_ID, "p", libc::S_IFIFO | 0o644, 0, 0, 0)
+        .unwrap();
+    assert_eq!(p.attrs.file_type, FileType::Fifo);
+    let c = s
+        .mknod(
+            FUSE_ROOT_ID,
+            "c",
+            libc::S_IFCHR | 0o600,
+            0,
+            0,
+            libc::makedev(1, 3) as u32,
+        )
+        .unwrap();
+    assert_eq!(c.attrs.file_type, FileType::CharDevice);
+    assert_eq!(c.attrs.rdev, Some(libc::makedev(1, 3) as u64));
+    let err = s.open(p.attrs.file_id, libc::O_RDWR, 0, 0).unwrap_err();
+    assert!(matches!(err, ArkError::NoSuchDevice { .. }));
+    assert_eq!(to_errno(&err), libc::ENXIO);
+    let err = s.open(c.attrs.file_id, libc::O_RDONLY, 0, 0).unwrap_err();
+    assert_eq!(to_errno(&err), libc::ENXIO);
+}
+
+/// copy_file_range copies a slice into a new file.
+#[test]
+fn fuse_copy_file_range() {
+    let _g = arkfs_test_review::guard();
+    let (_d, s) = sess();
+    let (_a, fha) = create(&s, "src");
+    s.write(fha, 0, b"abcdef").unwrap();
+    let (_b, fhb) = create(&s, "dst");
+    assert_eq!(s.copy_file_range(fha, 2, fhb, 0, 3, 0).unwrap(), 3);
+    s.release(fha).unwrap();
+    s.release(fhb).unwrap();
+    let dst = s.lookup(FUSE_ROOT_ID, "dst", 0, 0).unwrap();
+    let fh = s.open(dst.attrs.file_id, libc::O_RDONLY, 0, 0).unwrap();
+    assert_eq!(s.read(fh, 0, 8).unwrap(), b"cde");
+    assert_eq!(s.copy_file_range(fh, 0, fh, 0, 0, 0).unwrap(), 0);
+    assert!(s.copy_file_range(fh, 0, fh, 0, 1, 1).is_err());
+}
+
+/// SETLK conflict is Busy; flush of the owner clears the lock.
+#[test]
+fn fuse_getlk_setlk() {
+    let _g = arkfs_test_review::guard();
+    let (_d, s) = sess();
+    let (ino, fh) = create(&s, "lk");
+    s.setlk(ino, 1, 0, 7, libc::F_WRLCK, 9, false).unwrap();
+    let (start, end, typ, pid) = s.getlk(ino, 2, 0, 7, libc::F_WRLCK, 8).unwrap();
+    assert_eq!((start, end, typ, pid), (0, 7, libc::F_WRLCK, 9));
+    let err = s.setlk(ino, 2, 0, 7, libc::F_WRLCK, 8, false).unwrap_err();
+    assert!(matches!(err, ArkError::Busy { .. }));
+    s.flush(fh, 1).unwrap();
+    let (_, _, typ, _) = s.getlk(ino, 2, 0, 7, libc::F_WRLCK, 8).unwrap();
+    assert_eq!(typ, libc::F_UNLCK);
+    s.release(fh).unwrap();
+}
+
+/// poll on a regular file reports POLLIN and POLLOUT.
+#[test]
+fn fuse_poll() {
+    let _g = arkfs_test_review::guard();
+    let (_d, s) = sess();
+    let (ino, fh) = create(&s, "p");
+    let ready = s
+        .poll(ino, Some(fh), (libc::POLLIN | libc::POLLOUT) as u32)
+        .unwrap();
+    assert_ne!(ready & libc::POLLIN as u32, 0);
+    assert_ne!(ready & libc::POLLOUT as u32, 0);
+    s.release(fh).unwrap();
+}
+
+/// bmap is identity; blocksize 0 is EINVAL.
+#[test]
+fn fuse_bmap() {
+    let _g = arkfs_test_review::guard();
+    let (_d, s) = sess();
+    let (ino, fh) = create(&s, "b");
+    s.release(fh).unwrap();
+    assert_eq!(s.bmap(ino, 512, 4).unwrap(), 4);
+    assert!(s.bmap(ino, 0, 0).is_err());
+}
+
+/// readdirplus entries include FileAttr.kind.
+#[test]
+fn fuse_readdirplus() {
+    let _g = arkfs_test_review::guard();
+    let (_d, s) = sess();
+    s.mkdir(FUSE_ROOT_ID, "d", 0o755, 0, 0).unwrap();
+    let plus = s.readdir_plus(FUSE_ROOT_ID, 0, 0).unwrap();
+    let d = plus.iter().find(|(e, _, _)| e.name == "d").unwrap();
+    assert_eq!(d.1.kind, fuser::FileType::Directory);
+}
+
+/// fallocate grows size; SEEK_HOLE is EOF.
+#[test]
+fn fuse_fallocate_lseek() {
+    let _g = arkfs_test_review::guard();
+    let (_d, s) = sess();
+    let (ino, fh) = create(&s, "fa");
+    s.fallocate(ino, Some(fh), 0, 16, 0).unwrap();
+    assert_eq!(s.getattr(ino, Some(fh)).unwrap().size, 16);
+    assert_eq!(s.lseek(ino, Some(fh), 0, libc::SEEK_HOLE).unwrap(), 16);
+    assert_eq!(s.lseek(ino, Some(fh), 0, libc::SEEK_SET).unwrap(), 0);
+    assert_eq!(s.lseek(ino, Some(fh), 0, libc::SEEK_END).unwrap(), 16);
+    assert!(s.lseek(ino, Some(fh), 16, libc::SEEK_DATA).is_err());
+    s.fallocate(ino, Some(fh), 0, 32, libc::FALLOC_FL_KEEP_SIZE)
+        .unwrap();
+    assert_eq!(s.getattr(ino, Some(fh)).unwrap().size, 16);
+    s.release(fh).unwrap();
+}
+
+/// ioctl is in the reachability table (kernel reply is ENOTTY).
+#[test]
+fn fuse_ioctl_enotty() {
+    let _g = arkfs_test_review::guard();
+    // ioctl is kernel-facing only (ENOTTY). Reachability is the method in fuse.rs.
+    assert!(IMPLEMENTED_FUSE_OPS.contains(&"ioctl"));
+}
+
+/// access checks Unix bits; other-write on 0644 is PermissionDenied.
+#[test]
+fn fuse_access() {
+    let _g = arkfs_test_review::guard();
+    let (_d, s) = sess();
+    let (ino, fh) = create(&s, "a");
+    s.release(fh).unwrap();
+    s.access(ino, libc::F_OK, 9, 9).unwrap();
+    s.access(ino, libc::R_OK, 9, 9).unwrap();
+    let err = s.access(ino, libc::W_OK, 9, 9).unwrap_err();
+    assert!(matches!(err, ArkError::PermissionDenied { .. }));
+    assert_eq!(to_errno(&err), libc::EACCES);
+    let err = s.access(ino, libc::X_OK, 9, 9).unwrap_err();
+    assert_eq!(to_errno(&err), libc::EACCES);
+}
+
+/// statfs uses 4096-byte blocks (not dummy 512) and counts live paths.
+#[test]
+fn fuse_statfs() {
+    let _g = arkfs_test_review::guard();
+    let (_d, s) = sess();
+    let st = s.statfs().unwrap();
+    assert_eq!(st.bsize, 4096);
+    assert_eq!(st.frsize, 4096);
+    assert_eq!(st.namelen, 255);
+    assert_ne!(st.bsize, 512);
+    assert!(st.files >= 1);
+    assert!(st.blocks >= 1);
+    let before = st.files;
+    let (_ino, fh) = create(&s, "n");
+    s.release(fh).unwrap();
+    assert_eq!(s.statfs().unwrap().files, before + 1);
 }

@@ -11,9 +11,11 @@
 //!
 //! `PathKey::new` is used on decode (keys were canonical when written).
 
+use crate::View;
 use arkfs_core::codec::{Reader, Writer};
 use arkfs_core::{ArkError, FileType, ObjectId, PathKey, Timestamp};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 /// One cactus node for a path. `parent` is the index in `versions` (not a file_id).
 #[derive(Debug, Clone)]
@@ -37,10 +39,16 @@ pub const INDEX_MAGIC_V1: &[u8] = b"ARKIDX1";
 pub const INDEX_MAGIC_V2: &[u8] = b"ARKIDX2";
 
 /// Whole namespace. `next_file_id` is the next unused inode (root uses 1).
+///
+/// `ino_to_path` is derived from live `file_id`s (not encoded). Hard links keep
+/// the lexicographically first path (BTreeMap order), matching [`Self::find_ino`].
 #[derive(Debug, Clone, Default)]
 pub struct DurableIndex {
     pub next_file_id: u64,
-    pub paths: BTreeMap<PathKey, PathHistory>,
+    pub paths: BTreeMap<PathKey, Arc<PathHistory>>,
+    pub(crate) ino_to_path: HashMap<u64, PathKey>,
+    /// Live directory → sorted children. Rebuilt with the inode map.
+    pub(crate) live_children: HashMap<PathKey, Vec<(String, u64, FileType)>>,
 }
 
 /// Encode as `ARKIDX2`. No checksum trailer; integrity is the object's ObjectId.
@@ -76,12 +84,13 @@ pub fn decode_index(data: &[u8]) -> Result<DurableIndex, ArkError> {
     }
 }
 
+/// Current on-disk format. `file_id` and tombstone are required.
 fn decode_v2(data: &[u8]) -> Result<DurableIndex, ArkError> {
     let mut r = Reader::new(data);
     r.expect_magic(INDEX_MAGIC_V2)?;
     let mut idx = DurableIndex {
         next_file_id: r.u64()?,
-        paths: BTreeMap::new(),
+        ..Default::default()
     };
     let npaths = r.u32()? as usize;
     for _ in 0..npaths {
@@ -99,18 +108,20 @@ fn decode_v2(data: &[u8]) -> Result<DurableIndex, ArkError> {
                 file_type: decode_file_type(r.u8()?)?,
             });
         }
-        idx.paths.insert(path, PathHistory { versions });
+        idx.paths.insert(path, Arc::new(PathHistory { versions }));
     }
     r.finish()?;
+    idx.rebuild_ino_map();
     Ok(idx)
 }
 
+/// Read-only legacy: live file, `file_id = 0`. Do not write V1.
 fn decode_v1(data: &[u8]) -> Result<DurableIndex, ArkError> {
     let mut r = Reader::new(data);
     r.expect_magic(INDEX_MAGIC_V1)?;
     let mut idx = DurableIndex {
         next_file_id: r.u64()?,
-        paths: BTreeMap::new(),
+        ..Default::default()
     };
     let npaths = r.u32()? as usize;
     for _ in 0..npaths {
@@ -128,12 +139,14 @@ fn decode_v1(data: &[u8]) -> Result<DurableIndex, ArkError> {
                 file_type: FileType::File,
             });
         }
-        idx.paths.insert(path, PathHistory { versions });
+        idx.paths.insert(path, Arc::new(PathHistory { versions }));
     }
     r.finish()?;
+    idx.rebuild_ino_map();
     Ok(idx)
 }
 
+/// FileType → ARKIDX2 u8 tag.
 fn encode_file_type(t: FileType) -> u8 {
     match t {
         FileType::File => 0,
@@ -147,6 +160,7 @@ fn encode_file_type(t: FileType) -> u8 {
     }
 }
 
+/// ARKIDX2 u8 tag → FileType. Unknown is Integrity.
 fn decode_file_type(t: u8) -> Result<FileType, ArkError> {
     match t {
         0 => Ok(FileType::File),
@@ -158,5 +172,179 @@ fn decode_file_type(t: u8) -> Result<FileType, ArkError> {
         6 => Ok(FileType::Socket),
         7 => Ok(FileType::Reparse),
         _ => Err(ArkError::integrity(format!("bad file type {t}"))),
+    }
+}
+
+impl VersionRecord {
+    /// Same CAS ids and file identity; new cactus parent / tombstone bit.
+    pub(crate) fn continue_as(&self, at: Timestamp, parent: Option<u32>, tombstone: bool) -> Self {
+        VersionRecord {
+            content_id: self.content_id,
+            attrs_id: self.attrs_id,
+            at,
+            parent,
+            tombstone,
+            file_id: self.file_id,
+            file_type: self.file_type,
+        }
+    }
+}
+
+impl PathHistory {
+    /// Live = last version (caller checks tombstone). AsOf = last `at <= ts`.
+    pub(crate) fn record_in_view(&self, view: View) -> Option<&VersionRecord> {
+        match view {
+            View::Live => self.versions.last(),
+            View::AsOf(ts) => self.versions.iter().rev().find(|v| v.at <= ts),
+        }
+    }
+}
+
+impl DurableIndex {
+    /// Greatest `at` across every version. Used to seed the clock on reopen.
+    pub(crate) fn max_timestamp(&self) -> Timestamp {
+        let mut max = Timestamp::ZERO;
+        for hist in self.paths.values() {
+            for v in &hist.versions {
+                if v.at > max {
+                    max = v.at;
+                }
+            }
+        }
+        max
+    }
+
+    /// Append `rec` as the newest cactus node for `path` (creates the history if needed).
+    pub(crate) fn push(&mut self, path: PathKey, rec: VersionRecord) {
+        let hist = self.paths.entry(path).or_default();
+        Arc::make_mut(hist).versions.push(rec);
+    }
+
+    /// Index of the current last version, to store as the next record's `parent`.
+    pub(crate) fn version_parent(&self, path: &PathKey) -> Option<u32> {
+        self.paths.get(path).and_then(|h| {
+            let n = h.versions.len();
+            (n > 0).then_some((n - 1) as u32)
+        })
+    }
+
+    /// Last cactus node for `path`, including a tombstone. `None` if the path never existed.
+    pub(crate) fn last(&self, path: &PathKey) -> Option<&VersionRecord> {
+        self.paths.get(path).and_then(|h| h.versions.last())
+    }
+
+    /// Last version that is not a tombstone. `NotFound` if missing or tombstoned.
+    pub(crate) fn last_live(&self, path: &PathKey) -> Result<VersionRecord, ArkError> {
+        let last = self
+            .last(path)
+            .cloned()
+            .ok_or_else(|| ArkError::not_found(path.as_str()))?;
+        if last.tombstone {
+            Err(ArkError::not_found(path.as_str()))
+        } else {
+            Ok(last)
+        }
+    }
+
+    /// Live paths that are `prefix` or a descendant. Used by directory rename/exchange.
+    pub(crate) fn live_under(&self, prefix: &PathKey) -> Vec<PathKey> {
+        self.paths
+            .iter()
+            .filter_map(|(p, hist)| {
+                let last = hist.versions.last()?;
+                if last.tombstone || !p.is_under(prefix) {
+                    None
+                } else {
+                    Some(p.clone())
+                }
+            })
+            .collect()
+    }
+
+    /// First live path in `view` whose `file_id` is `ino`. Hard links: BTreeMap order.
+    pub(crate) fn find_ino(&self, ino: u64, view: View) -> Option<PathKey> {
+        for (path, hist) in &self.paths {
+            if let Some(rec) = hist.record_in_view(view) {
+                if !rec.tombstone && rec.file_id == ino {
+                    return Some(path.clone());
+                }
+            }
+        }
+        None
+    }
+
+    /// POSIX `st_nlink` for `rec` at `path` in `view` (not stored on the attr object).
+    pub(crate) fn nlink(&self, rec: &VersionRecord, path: &PathKey, view: View) -> u32 {
+        if rec.file_type == FileType::Directory {
+            let mut n = 2u32;
+            for (p, hist) in &self.paths {
+                if path.immediate_child(p).is_some() {
+                    if let Some(r) = hist.record_in_view(view) {
+                        if !r.tombstone && r.file_type == FileType::Directory {
+                            n = n.saturating_add(1);
+                        }
+                    }
+                }
+            }
+            n
+        } else {
+            let mut n = 0u32;
+            for hist in self.paths.values() {
+                if let Some(r) = hist.record_in_view(view) {
+                    if !r.tombstone && r.file_id == rec.file_id {
+                        n = n.saturating_add(1);
+                    }
+                }
+            }
+            n.max(1)
+        }
+    }
+
+    /// Rebuild live inode and children maps. Call after mutating `paths`.
+    pub(crate) fn rebuild_ino_map(&mut self) {
+        self.ino_to_path.clear();
+        self.live_children.clear();
+        for (path, hist) in &self.paths {
+            if let Some(rec) = hist.record_in_view(View::Live) {
+                if rec.tombstone {
+                    continue;
+                }
+                self.ino_to_path
+                    .entry(rec.file_id)
+                    .or_insert_with(|| path.clone());
+                if let Some(parent) = path.parent() {
+                    self.live_children.entry(parent).or_default().push((
+                        path.name().to_string(),
+                        rec.file_id,
+                        rec.file_type,
+                    ));
+                }
+            }
+        }
+        for kids in self.live_children.values_mut() {
+            kids.sort_by(|a, b| a.0.cmp(&b.0));
+        }
+    }
+
+    /// Count of live (non-tombstone) paths. Used by FUSE `statfs`.
+    pub(crate) fn live_path_count(&self) -> u64 {
+        self.paths
+            .values()
+            .filter(|h| h.versions.last().is_some_and(|v| !v.tombstone))
+            .count() as u64
+    }
+
+    /// Other live names of `file_id` (excludes `except`). Used to fan out writes.
+    pub(crate) fn live_siblings(&self, file_id: u64, except: &PathKey) -> Vec<PathKey> {
+        self.paths
+            .iter()
+            .filter_map(|(p, hist)| {
+                if p == except {
+                    return None;
+                }
+                let rec = hist.record_in_view(View::Live)?;
+                (!rec.tombstone && rec.file_id == file_id).then(|| p.clone())
+            })
+            .collect()
     }
 }

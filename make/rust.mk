@@ -9,6 +9,7 @@ build-rust:
 
 test-rust:
 	cd $(ROOT) && cargo test --workspace
+	@echo "Test review log: $(ROOT)/target/arkfs-test-review/events.ndjson"
 
 fmt-rust:
 	cd $(ROOT) && cargo fmt --all

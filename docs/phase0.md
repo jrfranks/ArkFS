@@ -35,7 +35,8 @@ root pointers (used by TemporalCore for `temporal_index`).
 ## Build
 
 ```bash
-make test      # all packages
+make setup     # clone/checkout: install local tools + git hooks
+make test      # all packages (also sets git hooksPath)
 make test-rust
 make test-elixir
 make ci

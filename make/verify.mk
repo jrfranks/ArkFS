@@ -1,33 +1,37 @@
 # Local-only correctness. GitHub never runs these targets.
-# precommit requires Kani, Miri (nightly), llvm-cov, and a working /dev/fuse.
-# Install once: `make install-hooks` (sets core.hooksPath to .githooks).
-# Bypass (emergency): git commit --no-verify  or  ARKFS_SKIP_PRECOMMIT=1.
+# prepush requires Kani, Miri (nightly), llvm-cov, and a working /dev/fuse.
+# Tools are installed by `make setup` (clone/checkout hooks), not on every push.
+# Commits are not gated. Bypass push: git push --no-verify  or  ARKFS_SKIP_PREPUSH=1.
+# `prepush` depends on setup-hooks (not `setup`) so the push gate is armed without
+# re-running the Kani/Miri installer.
 
-.PHONY: prove prove-fuse prove-tools-strict precommit install-hooks
+.PHONY: prove prove-fuse prove-tools-strict prepush precommit
 
-prove: precommit
+prove: prepush
 
 prove-fuse:
 	cd $(ROOT) && ARKFS_REQUIRE_FUSE=1 cargo test -p fuse_facade -p arkfs --all-targets
 
-precommit: install-hooks
+prepush: setup-hooks
 	ARKFS_REQUIRE_FUSE=1 $(MAKE) fmt-check clippy test prove-tools-strict
-	@echo "Pre-commit (full tests + live FUSE + proofs) passed."
+	@echo "Pre-push (full tests + live FUSE + proofs) passed."
+
+precommit: prepush
 
 prove-tools-strict:
 	@command -v cargo-llvm-cov >/dev/null 2>&1 || { \
-		echo "cargo-llvm-cov is required for local commits."; \
+		echo "cargo-llvm-cov is required for local push."; \
 		echo "  rustup component add llvm-tools-preview"; \
 		echo "  cargo install cargo-llvm-cov --locked"; \
 		exit 1; \
 	}
 	@cargo kani --version >/dev/null 2>&1 || { \
-		echo "Kani is required for local commits."; \
+		echo "Kani is required for local push."; \
 		echo "  cargo install --locked kani-verifier && cargo kani setup"; \
 		exit 1; \
 	}
 	@rustup +nightly component list --installed 2>/dev/null | grep -q '^miri' || { \
-		echo "Miri (nightly) is required for local commits."; \
+		echo "Miri (nightly) is required for local push."; \
 		echo "  rustup toolchain install nightly --component miri"; \
 		exit 1; \
 	}
@@ -40,7 +44,3 @@ prove-tools-strict:
 	cd $(ROOT) && cargo +nightly miri test -p arkfs_core --lib path_parse
 	@echo "==> llvm-cov fuse_facade"
 	cd $(ROOT) && ARKFS_REQUIRE_FUSE=1 cargo llvm-cov -p fuse_facade --fail-under-lines 80
-
-install-hooks:
-	@git -C "$(ROOT)" config core.hooksPath .githooks
-	@echo "git hooksPath -> .githooks (pre-commit runs make precommit)"

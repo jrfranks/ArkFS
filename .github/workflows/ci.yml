@@ -1,6 +1,6 @@
 # Minimal GitHub bar. Must stay runnable on ubuntu-latest without /dev/fuse,
-# Kani, Miri, or llvm-cov. Full proofs run locally via `make precommit`.
-# See docs/maintainer.md ("How to build and test").
+# Kani, Miri, or llvm-cov. Full proofs run locally via `make prepush`
+# (`.githooks/pre-push`). See docs/maintainer.md ("How to build and test").
 name: CI
 
 on:
