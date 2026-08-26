@@ -74,6 +74,9 @@ impl Drop for Guard {
 
 /// Narrative step (setup, kernel op, CAS inspect).
 pub fn step(msg: impl AsRef<str>) {
+    if !logging_enabled() {
+        return;
+    }
     ensure_started();
     emit(fields(
         "step",
@@ -88,6 +91,9 @@ pub fn step(msg: impl AsRef<str>) {
 
 /// Record an assert-style event. `ok` false still lets the caller panic.
 pub fn record_assert(kind: &str, expr: &str, ok: bool, detail: &str) {
+    if !logging_enabled() {
+        return;
+    }
     ensure_started();
     emit(fields(
         "assert",
@@ -109,6 +115,9 @@ pub fn record_eq<L: Debug, R: Debug>(
     ok: bool,
     detail: &str,
 ) {
+    if !logging_enabled() {
+        return;
+    }
     ensure_started();
     let pair = format!("{left_expr} == {right_expr}");
     emit(fields(
@@ -131,6 +140,9 @@ pub fn record_ne<L: Debug, R: Debug>(
     ok: bool,
     detail: &str,
 ) {
+    if !logging_enabled() {
+        return;
+    }
     ensure_started();
     let pair = format!("{left_expr} != {right_expr}");
     emit(fields(
@@ -212,6 +224,9 @@ fn ensure_started() {
 }
 
 fn emit_end(_name: &str, ok: bool, elapsed_ms: u128) {
+    if !logging_enabled() {
+        return;
+    }
     emit(format!(
         "{prefix}\"event\":\"end\",\"ok\":{ok},\"elapsed_ms\":{elapsed_ms}}}",
         prefix = common_prefix(),
@@ -219,11 +234,20 @@ fn emit_end(_name: &str, ok: bool, elapsed_ms: u128) {
     ));
 }
 
-fn common_prefix() -> String {
-    let ts = SystemTime::now()
+fn unix_ms() -> u128 {
+    // Miri isolation rejects CLOCK_REALTIME (`clock_gettime`). Logging is
+    // already disabled under Miri/Kani; this keeps accidental calls inert.
+    if cfg!(any(miri, kani)) {
+        return 0;
+    }
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis())
-        .unwrap_or(0);
+        .unwrap_or(0)
+}
+
+fn common_prefix() -> String {
+    let ts = unix_ms();
     let name = thread::current().name().unwrap_or("unknown").to_string();
     format!("{{\"ts_ms\":{ts},\"test\":\"{}\",", json_escape(&name))
 }
