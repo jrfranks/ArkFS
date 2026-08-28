@@ -76,13 +76,26 @@ pub struct ArkSession {
 impl ArkSession {
     /// Open `--data DIR` with no peer replication. `as_of_logical` is read-only.
     pub fn mount_store(data_dir: &Path, as_of_logical: Option<u64>) -> Result<Self, ArkError> {
+        Self::mount_store_inner(data_dir, as_of_logical, true)
+    }
+
+    /// Open an existing store for integrity checks without creating `/`.
+    pub fn inspect_store(data_dir: &Path) -> Result<Self, ArkError> {
+        Self::mount_store_inner(data_dir, Some(0), false)
+    }
+
+    fn mount_store_inner(
+        data_dir: &Path,
+        as_of_logical: Option<u64>,
+        ensure_root: bool,
+    ) -> Result<Self, ArkError> {
         let store = open_isolated_store(data_dir)?;
         let core = TemporalCore::open(store, QuorumPolicy::OwnerOnly)?;
-        // Own `/` as the mounting user so a non-root FUSE client can create in `/`.
-        // SAFETY: getuid/getgid are always defined on Linux and have no preconditions.
-        let uid = unsafe { libc::getuid() };
-        let gid = unsafe { libc::getgid() };
-        core.ensure_root_as(uid, gid)?;
+        if ensure_root {
+            let uid = unsafe { libc::getuid() };
+            let gid = unsafe { libc::getgid() };
+            core.ensure_root_as(uid, gid)?;
+        }
         let (view, read_only) = match as_of_logical {
             Some(logical) => (
                 View::AsOf(arkfs_core::Timestamp::new(logical, u64::MAX)),
@@ -559,17 +572,35 @@ impl ArkSession {
     /// Persist dirty bytes then drop the fh. On persist failure the buffer stays.
     pub fn release(&self, fh: u64) -> Result<(), ArkError> {
         let ino = self.fh_ino(fh)?;
-        self.flush_ino(ino)?;
+        let flush_res = self.flush_ino(ino);
         self.handles.lock().unwrap().remove(&fh);
         let mut inodes = self.inodes.lock().unwrap();
         if let Some(buf) = inodes.get_mut(&ino) {
             buf.refs = buf.refs.saturating_sub(1);
-            // Unlinked dirty data has no live name to persist; drop it.
             if buf.refs == 0 && (!buf.dirty || buf.unlinked) {
                 inodes.remove(&ino);
             }
         }
-        Ok(())
+        flush_res
+    }
+
+    /// Retry persist for every dirty inode (unmount / destroy).
+    pub fn flush_dirty(&self) -> Result<(), ArkError> {
+        let inos: Vec<u64> = self
+            .inodes
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, buf)| buf.dirty)
+            .map(|(ino, _)| *ino)
+            .collect();
+        let mut last = Ok(());
+        for ino in inos {
+            if let Err(e) = self.flush_ino(ino) {
+                last = Err(e);
+            }
+        }
+        last
     }
 
     /// Set one xattr. Fans out to every hard-link name of the inode.

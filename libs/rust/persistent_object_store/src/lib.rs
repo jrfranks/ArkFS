@@ -193,9 +193,14 @@ impl PersistentObjectStore {
         let id = ObjectId::from_bytes(data);
         let final_path = self.object_path(&id);
         if final_path.exists() {
-            self.get(&id)?;
-            let _ = self.backend.replicate_object(&id, data);
-            return Ok(id);
+            match self.get(&id) {
+                Ok(_) => {
+                    let _ = self.backend.replicate_object(&id, data);
+                    return Ok(id);
+                }
+                Err(ArkError::Integrity { .. }) => {}
+                Err(e) => return Err(e),
+            }
         }
 
         let staging = sibling_tmp(&final_path);

@@ -65,7 +65,14 @@ fn do_mount(
 
 /// Re-hash every CAS object. Exit 1 if any checksum fails.
 fn do_fsck(data: &std::path::Path) -> Result<(), String> {
-    let session = ArkSession::mount_store(data, None).map_err(|e| e.to_string())?;
+    let objects = data.join("primary").join("objects");
+    if !objects.is_dir() {
+        return Err(format!(
+            "not an ArkFS store (missing {})",
+            objects.display()
+        ));
+    }
+    let session = ArkSession::inspect_store(data).map_err(|e| e.to_string())?;
     let report = session.verify_integrity().map_err(|e| e.to_string())?;
     println!(
         "arkfs fsck: {} objects checked, {} failures",

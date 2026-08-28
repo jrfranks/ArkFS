@@ -68,8 +68,10 @@ impl Filesystem for FuseFs {
         Ok(())
     }
 
-    /// Unmount teardown. Open files were already flushed in release.
-    fn destroy(&mut self) {}
+    /// Unmount teardown. Retry dirty inodes that failed persist on release.
+    fn destroy(&mut self) {
+        let _ = self.0.flush_dirty();
+    }
 
     /// Kernel dropped a lookup ref. Inodes are durable file_ids; we do not evict.
     fn forget(&mut self, _req: &Request<'_>, _ino: u64, _nlookup: u64) {}
