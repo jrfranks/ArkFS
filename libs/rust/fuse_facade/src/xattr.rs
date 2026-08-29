@@ -11,7 +11,15 @@ pub enum SizedBytes {
     Range,
 }
 
-/// size=0 → length; too small → Range; else Data.
+/// FUSE xattr size protocol helper.
+///
+/// size == 0  → SizedBytes::Size(len)   (caller wants the length)
+/// size < len → SizedBytes::Range        (caller must retry with bigger buffer)
+/// size >= len → SizedBytes::Data(copy)  (send the bytes)
+///
+/// Used by getxattr/listxattr sized paths in FuseFs.
+///
+/// Maintainer: see reply_sized and "xattr" size protocol in maintainer.md.
 pub fn sized(value: &[u8], size: u32) -> SizedBytes {
     if size == 0 {
         SizedBytes::Size(value.len() as u32)

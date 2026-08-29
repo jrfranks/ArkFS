@@ -1023,10 +1023,16 @@ impl ArkSession {
         Ok(pos)
     }
 
-    /// Kernel fh → inode. Unknown fh is EINVAL.
+    /// Map a kernel file handle to its inode. Unknown fh returns InvalidArgument.
+    ///
+    /// fhs are allocated in open_handle and are just keys. The authoritative
+    /// state (data, dirty, path) lives in the per-inode InodeBuf map.
+    ///
+    /// Preconditions: fh was previously returned by open or create_file.
+    /// Postconditions: returns the ino that owns the buffer for this fh.
     ///
     /// Maintainer: fhs are just keys into the handles table; the real state is
-    /// the per-inode InodeBuf. See "fh" vs inode.
+    /// the per-inode InodeBuf. See "fh" vs inode and "Open-file cache is per-inode".
     fn fh_ino(&self, fh: u64) -> Result<u64, ArkError> {
         self.handles
             .lock()
@@ -1036,7 +1042,13 @@ impl ArkSession {
             .ok_or_else(|| ArkError::invalid_argument("bad fh"))
     }
 
-    /// fcntl locks apply to files, not directories.
+    /// Reject fcntl locks on directories.
+    ///
+    /// Looks up the inode and returns InvalidArgument if it is a directory.
+    /// Regular files (and most specials) are lockable.
+    ///
+    /// Preconditions: ino is visible in the view.
+    /// Postconditions: Ok for files, error for directories.
     ///
     /// Maintainer: POSIX record locks are only meaningful on regular files.
     /// Directories return EINVAL. See posix_lock and "POSIX locks".
@@ -1048,10 +1060,18 @@ impl ArkSession {
         Ok(())
     }
 
-    /// Dirty open size wins over the last persisted `logical_size`.
+    /// Overlay the current dirty buffer size onto a FileAttr (if the inode is open).
+    ///
+    /// If the inode has a loaded InodeBuf, its .data.len() becomes the reported size
+    /// and blocks is recomputed. Called from getattr when an fh is supplied and
+    /// from readdir_plus. No-op when the inode has no open buffer.
+    ///
+    /// Preconditions: attr is a snapshot from core or cached getattr.
+    /// Postconditions: size/blocks reflect the dirty buffer if present.
     ///
     /// Maintainer: used by getattr when an open fh is supplied. The per-inode
-    /// buffer is authoritative for size while the file is open. See "getattr".
+    /// buffer is authoritative for size while the file is open. See "getattr"
+    /// and "Open-file cache is per-inode".
     fn overlay_cached_size(&self, ino: u64, attr: &mut FileAttr) {
         if let Some(buf) = self.inodes.lock().unwrap().get(&ino) {
             if buf.loaded {
@@ -1061,10 +1081,17 @@ impl ArkSession {
         }
     }
 
-    /// Stat from the open-file cache when the live name is gone.
+    /// Return a FileAttr from the open InodeBuf for an unlinked inode.
+    ///
+    /// Used after the last name is tombstoned but fhs remain. Forces nlink=0.
+    /// Size comes from the dirty buffer if loaded. Returns None if no buffer.
+    ///
+    /// Preconditions: may be called after unlink while fhs are still open.
+    /// Postconditions: attr reflects the last known stat + current dirty bytes.
     ///
     /// Maintainer: after unlink of the last name, fstat on an open fd must
-    /// still work from the cached InodeBuf. nlink is forced to 0.
+    /// still work from the cached InodeBuf. nlink is forced to 0. See
+    /// "getattr_cached" and "Open-file cache is per-inode".
     fn getattr_cached(&self, ino: u64) -> Option<FileAttr> {
         let inodes = self.inodes.lock().unwrap();
         let buf = inodes.get(&ino)?;
@@ -1128,7 +1155,14 @@ impl ArkSession {
         Ok(fh)
     }
 
-    /// Load CAS bytes into `buf`. If the cached path is stale, retry by inode.
+    /// Load CAS bytes into `buf`. If the cached path is stale after rename/unlink, retry by inode.
+    ///
+    /// If buf is already loaded, no-op. On lookup failure for the stored path,
+    /// falls back to lookup_ino so unlinked-but-open files still read their
+    /// last content. Updates buf.data, stat, path and sets loaded=true.
+    ///
+    /// Preconditions: buf belongs to `ino`.
+    /// Postconditions: buf.loaded is true and data reflects last committed content.
     ///
     /// Maintainer: called on first read/write after open or after rename/unlink
     /// retargeting. If the live name is gone we fall back to lookup by inode.
@@ -1148,11 +1182,18 @@ impl ArkSession {
         Ok(())
     }
 
-    /// Resize the shared inode buffer, or persist a truncate if the file is not open.
+    /// Resize the shared inode buffer (dirty), or persist a truncate when the inode has no open buffer.
+    ///
+    /// If an InodeBuf exists we resize it in place and mark dirty (no I/O).
+    /// Otherwise we read the last content, resize, and call replace_content
+    /// (which does commit_branch + persist). Used by setattr size path.
+    ///
+    /// Preconditions: ino is a regular file visible live.
+    /// Postconditions: logical size changed; either buffer is dirty or a new version exists.
     ///
     /// Maintainer: if the inode has an open buffer we mutate it (dirty=true).
     /// Otherwise we go through replace_content (which does commit_branch).
-    /// See "truncate" and open-file cache rules.
+    /// See "truncate" and "Open-file cache is per-inode".
     fn truncate_ino(&self, ino: u64, size: u64) -> Result<(), ArkError> {
         {
             let mut inodes = self.inodes.lock().unwrap();
@@ -1172,7 +1213,14 @@ impl ArkSession {
         Ok(())
     }
 
-    /// Persist dirty regular-file bytes. No-op for unlinked inodes and special files.
+    /// Persist dirty regular-file bytes for this inode (the core of fsync/release).
+    ///
+    /// Clones the buffer under lock, drops the lock, then calls replace_content.
+    /// On NotFound (name gone after unlink) it retries via lookup_ino. On any
+    /// persist error the buffer stays dirty. Special files and non-dirty are no-ops.
+    ///
+    /// Preconditions: called while holding no index lock.
+    /// Postconditions: on success dirty is cleared; on failure dirty remains.
     ///
     /// Maintainer: the heart of durability on close/fsync. Must succeed or
     /// keep the buffer dirty. On name disappearance after unlink, it may
@@ -1211,11 +1259,18 @@ impl ArkSession {
         Ok(())
     }
 
-    /// Flush every open inode whose cached path is under `prefix` (directory rename).
+    /// Flush every open inode whose cached path is under `prefix` (used before directory rename).
+    ///
+    /// Collects inodes whose PathKey is under the prefix, then calls flush_ino on each.
+    /// Guarantees that any dirty data under a subtree being moved becomes a version
+    /// before rebase changes the paths.
+    ///
+    /// Preconditions: called while holding the caller side of a rename.
+    /// Postconditions: all matching buffers are non-dirty (or error).
     ///
     /// Maintainer: called before rename when the source subtree may have dirty
     /// buffers. Ensures data is a version before the tree move.
-    /// See "flush_under" and directory rename trap.
+    /// See "flush_under" and "Directory rename" trap.
     fn flush_under(&self, prefix: &PathKey) -> Result<(), ArkError> {
         let inos: Vec<u64> = self
             .inodes
@@ -1231,7 +1286,18 @@ impl ArkSession {
         Ok(())
     }
 
-    /// After rename/unlink, retarget open buffers to a remaining live name (or mark unlinked).
+    /// After rename/unlink, retarget every open InodeBuf to a remaining live name (or mark unlinked).
+    ///
+    /// Iterates known inodes and does lookup_ino(Live). On success updates buf.path
+    /// and clears unlinked. On failure (no live name) sets unlinked=true so later
+    /// flush_ino can still succeed via the cached content for open fhs.
+    ///
+    /// Preconditions: called after a successful core rename or unlink that may have
+    /// moved or removed names of open inodes.
+    /// Postconditions: every open buffer's path reflects a live name or is marked unlinked.
+    ///
+    /// Maintainer: directory rename retargets open-file caches by inode
+    /// (lookup_ino). See "Directory rename" and "Open-file cache is per-inode".
     fn sync_inode_paths(&self) {
         let inos: Vec<u64> = self.inodes.lock().unwrap().keys().copied().collect();
         for ino in inos {
@@ -1253,6 +1319,15 @@ impl ArkSession {
 }
 
 /// Map `stat.st_mode` `S_IFMT` bits to [`FileType`]. `0` means regular (mknod default).
+///
+/// Used by mknod/create paths before calling into TemporalCore. Unknown types
+/// become InvalidArgument (never reach the index).
+///
+/// Preconditions: mode contains a POSIX file type or 0.
+/// Postconditions: returns a FileType or error for unsupported S_IF*.
+///
+/// Maintainer: only regular/dir/symlink/device/fifo/socket are supported.
+/// See mknod and "mknod file type".
 fn mode_to_file_type(mode: u32) -> Result<FileType, ArkError> {
     match mode & libc::S_IFMT {
         0 | libc::S_IFREG => Ok(FileType::File),
@@ -1267,12 +1342,25 @@ fn mode_to_file_type(mode: u32) -> Result<FileType, ArkError> {
 }
 
 /// True when open flags include O_WRONLY or O_RDWR.
+///
+/// Used to decide whether an open should go through ro() and whether to
+/// allocate a writable InodeBuf. Ignores O_TRUNC for the "writable" bit
+/// (O_TRUNC is handled separately).
+///
+/// Maintainer: O_TRUNC still requires write permission via open_mask.
+/// See open() and create_file.
 fn is_writable(flags: i32) -> bool {
     let acc = flags & libc::O_ACCMODE;
     acc == libc::O_WRONLY || acc == libc::O_RDWR
 }
 
 /// POSIX access mask implied by open flags (`O_TRUNC` requires write).
+///
+/// Combines R/W according to O_ACCMODE and always adds W when O_TRUNC.
+/// Used by open() to call require_mode.
+///
+/// Maintainer: O_TRUNC implies write even on O_RDONLY base. See open() and
+/// "open-file cache is per-inode".
 fn open_mask(flags: i32) -> u32 {
     let acc = flags & libc::O_ACCMODE;
     let mut mask = if acc == libc::O_WRONLY {
@@ -1288,7 +1376,10 @@ fn open_mask(flags: i32) -> u32 {
     mask
 }
 
-/// Convert backing `statvfs` into 4096-byte block counts. On failure, used-only.
+/// Convert backing `statvfs` into 4096-byte block counts. On failure, return used-only numbers.
+///
+/// Used by statfs when the real backing filesystem cannot be queried. Returns
+/// (blocks, bfree, bavail) scaled to the requested bsize. Never panics.
 fn backing_blocks(root: &Path, bsize: u32, used: u64) -> (u64, u64, u64) {
     let Ok(c) = CString::new(root.as_os_str().as_bytes()) else {
         return (used, 0, 0);
@@ -1306,7 +1397,14 @@ fn backing_blocks(root: &Path, bsize: u32, used: u64) -> (u64, u64, u64) {
     (blocks, bfree, bfree)
 }
 
-/// Temporal handle → `fuser::FileAttr`. Non-root `ino` is `attrs.file_id`.
+/// Convert a TemporalCore FileHandle into a fuser::FileAttr for FUSE replies.
+///
+/// Root path always projects inode 1 (FUSE_ROOT_ID). Non-root uses
+/// attrs.file_id. Size/blocks come from attr_map::to_fuse. crtime uses btime.
+/// blksize is fixed at 4096. Never returns 0 inode.
+///
+/// Maintainer: non-root ino is attrs.file_id. Root is always FUSE_ROOT_ID.
+/// See "FUSE root is always inode 1" and handle_to_attr.
 pub fn handle_to_attr(h: &FileHandle) -> FileAttr {
     let st = to_fuse(&h.attrs);
     FileAttr {
