@@ -19,9 +19,11 @@ Onboarding for the code itself is in [maintainer.md](maintainer.md). This page i
 
 `PersistentObjectStore` is a content-addressed byte store. `put` returns success only after:
 
-1. Local durable staging write (`fsync` of the object tempfile and parent directory)
-2. Quorum acknowledgments from `ReplicationBackend` (Phase 0: `LocalQuorum` remotes)
-3. Atomic publish of the primary object name (`rename` + directory `fsync`)
+1. Local durable staging write (`fsync` of the object tempfile and parent directory), skipped when an intact primary already exists; a checksum-mismatch primary is rewritten
+2. Quorum acknowledgments from `ReplicationBackend` (new and existing objects; Phase 0 FUSE uses `NoPeers` + `OwnerOnly`)
+3. Atomic publish of the primary object name (`rename` + directory `fsync`), new objects and corrupt rewrites only
+
+IPC contract: [conformance/ipc.md](conformance/ipc.md).
 
 Identity is `ObjectId::from_bytes(payload)` (BLAKE3). There is no sidecar metadata file.
 `get` rehashes and fails closed on mismatch. `set_anchor` / `get_anchor` persist named
@@ -40,8 +42,13 @@ make test      # all packages (also sets git hooksPath)
 make test-rust
 make test-elixir
 make ci
+make test         # cargo test (debug) + mix test
+make sim          # Elixir scenario catalog (escript)
+make release      # target/release/arkfs only
+make install      # $(PREFIX)/bin/arkfs (no Mix)
 ```
 
 Make is the monorepo organizer. Mix is used only inside each Elixir package directory.
-Rust `cargo test` covers store and temporal guarantees. `sim_runner` exercises the
-Elixir harness (clock, delay, chaos log, history oracle) only.
+Rust `cargo test` covers store and temporal guarantees. `make sim` / `mix test`
+exercise the Elixir harness (clock, delay, chaos log, history oracle) only.
+Those are not `make release`.

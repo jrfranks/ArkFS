@@ -10,7 +10,14 @@ defmodule SimRunner.MixProject do
       elixir: "~> 1.16",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
+      # Escript = make sim (dev). Mix release = make sim-standalone (not make release).
       escript: [main_module: SimRunner.CLI],
+      releases: [
+        sim_runner: [
+          include_erts: true,
+          include_executables_for: [:unix]
+        ]
+      ],
       description: "ArkFS app: runs SimulationHarness scenarios (includes harness library)",
       package: [licenses: ["MIT"]]
     ]

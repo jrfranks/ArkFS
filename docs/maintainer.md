@@ -4,7 +4,11 @@ This is the onboarding document for engineers who have not worked on a
 filesystem, a content-addressed store, or a FUSE adapter before. Read this
 before changing code. Product intent lives in [SPEC.md](../SPEC.md); attribute
 rules live in [attributes.md](attributes.md); FUSE user docs live in
-[fuse.md](fuse.md).
+[fuse.md](fuse.md). IPC test oracle:
+[conformance/ipc.md](conformance/ipc.md). FUSE reachability:
+[fuse-conformance.md](fuse-conformance.md). Linux ABI and POSIX.1 XSH
+inventories (not ArkFS oracles): [conformance/fuse-abi.md](conformance/fuse-abi.md),
+[conformance/posix-xsh.md](conformance/posix-xsh.md).
 
 ## What ArkFS is
 
@@ -87,7 +91,7 @@ These words show up in comments and types. Use them consistently.
 ## Repository layout
 
 ```
-Makefile                 # organizer: build, test, ci, prepush, setup
+Makefile                 # organizer: build, release, install, test, ci, prepush, setup
 make/setup.mk            # clone/checkout: git hooks + scripts/setup-tools.sh
 rust-toolchain.toml      # rustup stable + rustfmt/clippy/llvm-tools
 scripts/setup-tools.sh   # rustup, Kani, Miri, llvm-cov (no-op when CI is set)
@@ -109,6 +113,7 @@ libs/elixir/simulation_harness
 apps/arkfs               # FUSE CLI
 apps/sim_runner          # Elixir harness scenarios
 docs/                    # human docs (this file, fuse, attributes, phase0)
+docs/conformance/        # IPC test oracle; Linux ABI / POSIX XSH inventories
 ```
 
 `target/` and Elixir `_build/` are generated. Do not commit them.
@@ -180,17 +185,20 @@ always_on   = backend.always_on_count() + 1
 | Policy | Need |
 |--------|------|
 | `OwnerOnly` | 1 (local only) |
-| `Quorum(n)` | `n` including local |
+| `QuorumPolicy::n(k)` (`k >= 1`) | `k` including local |
 | `AllAlwaysOn` | every reachable copy including local |
 
 Single-node FUSE uses `OwnerOnly`. The replication backend for that path must
 act as **no peers**: `replicate_*` returns 0, `always_on_count` is 0, no
 replica directories, no network. `LocalQuorum` with `replica_names = ["local"]`
-happens to have an empty remote list via `skip(1)` — that is implicit, not
-explicit isolation. Prefer an explicit no-peers backend when adding or
-reviewing that path.
+happens to have an empty remote list via `remotes_under` (`skip(1)`) — that
+is implicit, not explicit isolation. Prefer an explicit no-peers backend when
+adding or reviewing that path.
 
-`Quorum(n)` with `n > 1` and zero remotes must **fail closed** (no publish).
+`QuorumPolicy::n(k)` with `k > 1` and zero remotes must **fail closed** (no publish).
+`k == 0` is not a policy (`n` panics). Existing `put` of an intact published
+object still requires quorum (catch-up) and does not rewrite the primary.
+A checksum-mismatch primary is rewritten on the new-object path.
 
 ## FUSE specifics
 
@@ -233,6 +241,12 @@ make help
 make test          # cargo test --workspace + mix test (also sets git hooksPath)
 make ci            # GitHub: rustfmt + mix format + those tests
 make prepush       # local push bar: clippy + tests + Kani + Miri + llvm-cov + live FUSE
+make test          # cargo test (debug) + mix test — sim/test bar
+make sim           # Elixir scenario catalog (escript; MIX_ENV=dev)
+make sim-standalone  # optional ERTS-bundled sim tool (not a FUSE release)
+make release       # cargo --release arkfs ELF only
+make install       # arkfs → $(PREFIX)/bin (no Mix)
+make install-sim   # optional portable sim_runner (needs Elixir on the build host)
 ```
 
 Every Rust and Elixir test appends NDJSON to `target/arkfs-test-review/events.ndjson`
@@ -241,7 +255,7 @@ Every Rust and Elixir test appends NDJSON to `target/arkfs-test-review/events.nd
 `ARKFS_TEST_REVIEW=0`. Off under Miri/Kani. Use this file for later automated
 review of what ran and what was checked.
 
-`make build` / `make test` / `make all` call `setup-hooks` so the first Make target after clone sets `core.hooksPath=.githooks`. Until that runs, `git push` has no pre-push hook — run `make test` or `make setup` once. There is no `pre-commit` hook: **commits are not gated**. If `core.sshCommand` is unset, `setup-hooks` also sets SSH keepalives (`ServerAliveInterval=5`) so the remote does not drop an idle connection while pre-push runs Kani, Miri, and llvm-cov.
+`make build` / `make test` / `make sim` / `make all` / `make release` call `setup-hooks` so the first Make target after clone sets `core.hooksPath=.githooks`. Until that runs, `git push` has no pre-push hook — run `make test` or `make setup` once. **Sim/test is not a release build:** `make test` is debug `cargo test` plus `mix test`; `make sim` is a Mix escript. `make release` / `make install` are the FUSE ELF only and do not need Mix. Optional `make sim-standalone` / `make install-sim` bundle ERTS for a portable catalog; that is still a sim tool, not the FUSE node. There is no `pre-commit` hook: **commits are not gated**. If `core.sshCommand` is unset, `setup-hooks` also sets SSH keepalives (`ServerAliveInterval=5`) so the remote does not drop an idle connection while pre-push runs Kani, Miri, and llvm-cov.
 
 `scripts/setup-tools.sh` is the installer. `.githooks/post-checkout` and `post-merge` call it, so **checkout and pull keep tools installed** once hooksPath is set. `CI` or `ARKFS_SKIP_SETUP=1` skips it. `rust-toolchain.toml` makes rustup fetch stable + rustfmt/clippy/llvm-tools on the first `cargo` in the tree. `make prepush` does **not** re-run the installer.
 

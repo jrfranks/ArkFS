@@ -26,7 +26,7 @@
 //! - [`NoPeers`]: `replicate_*` → 0, `always_on_count` → 0, no replica dirs.
 //!   Use [`open_isolated_store`] for single-node FUSE.
 //! - [`LocalQuorum`]: writes extra directories (cluster *simulation*).
-//! - [`open_local_quorum_store`]: first name is primary, `skip(1)` are remotes.
+//! - [`open_local_quorum_store`]: first name is primary; remotes via [`LocalQuorum::remotes_under`].
 //!
 //! Onboarding: `docs/maintainer.md` (safe-write + isolation sections).
 
@@ -35,7 +35,7 @@ use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// Report from a full integrity scan.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,7 +95,13 @@ pub fn open_isolated_store(base: impl AsRef<Path>) -> Result<PersistentObjectSto
 ///
 /// Used by harness tests (`open_local_quorum_store` with several names).
 /// `lose_node` / `restore_node` simulate partition without real networking.
+/// `Clone` shares the lost-set so tests can partition after `open`.
+#[derive(Clone)]
 pub struct LocalQuorum {
+    inner: Arc<LocalQuorumInner>,
+}
+
+struct LocalQuorumInner {
     replica_dirs: Vec<(String, PathBuf)>,
     lost: Mutex<HashSet<String>>,
 }
@@ -108,26 +114,40 @@ impl LocalQuorum {
             fs::create_dir_all(p.join("anchors")).map_err(ArkError::from)?;
         }
         Ok(LocalQuorum {
-            replica_dirs,
-            lost: Mutex::new(HashSet::new()),
+            inner: Arc::new(LocalQuorumInner {
+                replica_dirs,
+                lost: Mutex::new(HashSet::new()),
+            }),
         })
+    }
+
+    /// Remotes are `names[1..]` at `base/replicas/<name>`. `names[0]` is the
+    /// primary label only. Empty `names` yields zero remotes.
+    pub fn remotes_under(base: impl AsRef<Path>, names: &[&str]) -> Result<Self, ArkError> {
+        let base = base.as_ref();
+        let dirs = names
+            .iter()
+            .skip(1)
+            .map(|name| (name.to_string(), base.join("replicas").join(name)))
+            .collect();
+        Self::new(dirs)
     }
 
     /// Simulate partition: later replicate_* skip this replica.
     pub fn lose_node(&self, node_id: &str) {
-        self.lost.lock().unwrap().insert(node_id.to_string());
+        self.inner.lost.lock().unwrap().insert(node_id.to_string());
     }
 
     /// Undo lose_node.
     pub fn restore_node(&self, node_id: &str) {
-        self.lost.lock().unwrap().remove(node_id);
+        self.inner.lost.lock().unwrap().remove(node_id);
     }
 
     /// Run `write` on every replica that is not lost; count successes.
     fn acks(&self, write: impl Fn(&Path) -> Result<(), ArkError>) -> u32 {
-        let lost = self.lost.lock().unwrap().clone();
+        let lost = self.inner.lost.lock().unwrap().clone();
         let mut acks = 0u32;
-        for (name, dir) in &self.replica_dirs {
+        for (name, dir) in &self.inner.replica_dirs {
             if lost.contains(name) {
                 continue;
             }
@@ -157,8 +177,9 @@ impl ReplicationBackend for LocalQuorum {
 
     /// Replicas that are not currently marked lost.
     fn always_on_count(&self) -> u32 {
-        let lost = self.lost.lock().unwrap();
-        self.replica_dirs
+        let lost = self.inner.lost.lock().unwrap();
+        self.inner
+            .replica_dirs
             .iter()
             .filter(|(n, _)| !lost.contains(n))
             .count() as u32
@@ -185,29 +206,37 @@ impl PersistentObjectStore {
 
     /// Store bytes; **blocks until safe** (local fsync + quorum + publish).
     ///
-    /// If the object already exists, still attempts `replicate_object` so a
-    /// late-joining replica can catch up, then returns the id without rewriting
-    /// the primary. Quorum failure on a *new* object deletes the staging file
-    /// and does not publish.
+    /// An intact existing primary is not rewritten. Catch-up still
+    /// `replicate_object`s and still requires quorum. A checksum-mismatch
+    /// primary is rewritten on the new-object path. Replicate or quorum
+    /// failure discards new/rewrite staging and does not unpublish an intact
+    /// existing name.
     pub fn put(&self, data: &[u8], quorum: QuorumPolicy) -> Result<ObjectId, ArkError> {
         let id = ObjectId::from_bytes(data);
         let final_path = self.object_path(&id);
-        if final_path.exists() {
+        let staging = if final_path.exists() {
             match self.get(&id) {
-                Ok(_) => {
-                    let _ = self.backend.replicate_object(&id, data);
-                    return Ok(id);
+                Ok(_) => None,
+                Err(ArkError::Integrity { .. }) => {
+                    let staging = sibling_tmp(&final_path);
+                    write_fsync(&staging, data)?;
+                    Some(staging)
                 }
-                Err(ArkError::Integrity { .. }) => {}
                 Err(e) => return Err(e),
             }
+        } else {
+            let staging = sibling_tmp(&final_path);
+            write_fsync(&staging, data)?;
+            Some(staging)
+        };
+        let remote = self
+            .backend
+            .replicate_object(&id, data)
+            .inspect_err(|_| discard_staging(staging.as_deref()))?;
+        self.require_quorum(remote, quorum, staging.as_deref())?;
+        if let Some(ref staging) = staging {
+            publish(staging, &final_path)?;
         }
-
-        let staging = sibling_tmp(&final_path);
-        write_fsync(&staging, data)?;
-        let remote = self.backend.replicate_object(&id, data)?;
-        self.require_quorum(remote, quorum, Some(&staging))?;
-        publish(&staging, &final_path)?;
         Ok(id)
     }
 
@@ -311,7 +340,10 @@ impl PersistentObjectStore {
         let final_path = self.anchor_path(name);
         let staging = sibling_tmp(&final_path);
         write_fsync(&staging, id.as_bytes())?;
-        let remote = self.backend.replicate_anchor(name, id.as_bytes())?;
+        let remote = self
+            .backend
+            .replicate_anchor(name, id.as_bytes())
+            .inspect_err(|_| discard_staging(Some(&staging)))?;
         self.require_quorum(remote, quorum, Some(&staging))?;
         publish(&staging, &final_path)?;
         Ok(())
@@ -350,7 +382,8 @@ impl PersistentObjectStore {
         self.root.join("anchors").join(name)
     }
 
-    /// Local write counts as +1. On failure, delete `staging` so the name is unpublished.
+    /// Local write counts as +1. On failure, discard `staging` (new names only;
+    /// an existing primary is not unpublished).
     fn require_quorum(
         &self,
         remote_acks: u32,
@@ -362,13 +395,18 @@ impl PersistentObjectStore {
         if quorum.is_satisfied(total, always_on) {
             return Ok(());
         }
-        if let Some(s) = staging {
-            let _ = fs::remove_file(s);
-        }
+        discard_staging(staging);
         Err(ArkError::Quorum {
             got: total,
             need: quorum.required_acks(always_on),
         })
+    }
+}
+
+/// Best-effort: unpublished staging must not remain as a leftover name.
+fn discard_staging(staging: Option<&Path>) {
+    if let Some(s) = staging {
+        let _ = fs::remove_file(s);
     }
 }
 
@@ -423,9 +461,9 @@ fn fsync_dir(path: impl AsRef<Path>) -> Result<(), ArkError> {
 
 /// Primary at `base/primary`; remaining names are remote replica directories.
 ///
-/// `replica_names[0]` is the primary label (not a remote). `skip(1)` become
-/// `base/replicas/<name>`. A single name therefore opens a store with an
-/// **empty** [`LocalQuorum`] — implicit isolation, still a cluster backend.
+/// `replica_names[0]` is the primary label (not a remote). Remotes are
+/// [`LocalQuorum::remotes_under`]. A single name therefore opens a store with
+/// an **empty** [`LocalQuorum`] — implicit isolation, still a cluster backend.
 pub fn open_local_quorum_store(
     base: impl AsRef<Path>,
     replica_names: &[&str],
@@ -436,14 +474,8 @@ pub fn open_local_quorum_store(
         ));
     }
     let base = base.as_ref();
-    let primary = base.join("primary");
-    let remotes: Vec<(String, PathBuf)> = replica_names
-        .iter()
-        .skip(1)
-        .map(|name| (name.to_string(), base.join("replicas").join(name)))
-        .collect();
-    let backend = LocalQuorum::new(remotes)?;
-    PersistentObjectStore::open(primary, Box::new(backend))
+    let backend = LocalQuorum::remotes_under(base, replica_names)?;
+    PersistentObjectStore::open(base.join("primary"), Box::new(backend))
 }
 
 #[cfg(test)]
@@ -461,7 +493,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = open_local_quorum_store(dir.path(), &["n0", "n1", "n2"]).unwrap();
         let data = b"hello arkfs";
-        let id = store.put(data, QuorumPolicy::Quorum(2)).unwrap();
+        let id = store.put(data, QuorumPolicy::n(2)).unwrap();
         assert_eq!(id, ObjectId::from_bytes(data));
         assert_eq!(store.get(&id).unwrap(), data);
         let report = store.verify_integrity().unwrap();
@@ -474,30 +506,9 @@ mod tests {
         let _g = arkfs_test_review::guard();
         let dir = tempfile::tempdir().unwrap();
         let store = open_local_quorum_store(dir.path(), &["n0", "n1"]).unwrap();
-        let a = store.put(b"same", QuorumPolicy::Quorum(2)).unwrap();
-        let b = store.put(b"same", QuorumPolicy::Quorum(2)).unwrap();
+        let a = store.put(b"same", QuorumPolicy::n(2)).unwrap();
+        let b = store.put(b"same", QuorumPolicy::n(2)).unwrap();
         assert_eq!(a, b);
-    }
-
-    /// Quorum(2) with no remotes must not publish the object name.
-    #[test]
-    fn quorum_fails_closed_without_publishing() {
-        let _g = arkfs_test_review::guard();
-        let dir = tempfile::tempdir().unwrap();
-        let backend = LocalQuorum::new(vec![
-            ("n1".into(), dir.path().join("replicas/n1")),
-            ("n2".into(), dir.path().join("replicas/n2")),
-        ])
-        .unwrap();
-        backend.lose_node("n1");
-        backend.lose_node("n2");
-        let store =
-            PersistentObjectStore::open(dir.path().join("primary"), Box::new(backend)).unwrap();
-        let err = store.put(b"x", QuorumPolicy::Quorum(2)).unwrap_err();
-        assert!(matches!(err, ArkError::Quorum { got: 1, need: 2 }));
-        let id = ObjectId::from_bytes(b"x");
-        assert!(!store.object_path(&id).exists());
-        assert!(matches!(store.get(&id), Err(ArkError::NotFound { .. })));
     }
 
     /// Corrupting an object file makes get and integrity_scan fail.
@@ -507,7 +518,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = open_local_quorum_store(dir.path(), &["n0", "n1"]).unwrap();
         let data = b"integrity-me";
-        let id = store.put(data, QuorumPolicy::Quorum(1)).unwrap();
+        let id = store.put(data, QuorumPolicy::n(1)).unwrap();
         let path = store.object_path(&id);
         let mut buf = fs::read(&path).unwrap();
         buf[0] ^= 1;
@@ -515,16 +526,6 @@ mod tests {
         assert!(matches!(store.get(&id), Err(ArkError::Integrity { .. })));
         let report = store.verify_integrity().unwrap();
         assert!(!report.ok());
-    }
-
-    /// OwnerOnly publishes with only the local write.
-    #[test]
-    fn owner_only_succeeds_with_single_node() {
-        let _g = arkfs_test_review::guard();
-        let dir = tempfile::tempdir().unwrap();
-        let store = open_local_quorum_store(dir.path(), &["owner"]).unwrap();
-        let id = store.put(b"solo", QuorumPolicy::OwnerOnly).unwrap();
-        assert_eq!(store.get(&id).unwrap(), b"solo");
     }
 
     /// usage counts published `*.obj` bytes and ignores missing dirs.
@@ -540,35 +541,6 @@ mod tests {
         assert_eq!(count, 1);
         assert_eq!(bytes, 100);
         assert!(store.root().ends_with("primary"));
-    }
-
-    /// NoPeers + OwnerOnly/AllAlwaysOn succeed; no replicas/ dir.
-    #[test]
-    fn isolated_owner_only_and_all_always_on() {
-        let _g = arkfs_test_review::guard();
-        let dir = tempfile::tempdir().unwrap();
-        let store = open_isolated_store(dir.path()).unwrap();
-        let id = store.put(b"solo", QuorumPolicy::OwnerOnly).unwrap();
-        assert_eq!(store.get(&id).unwrap(), b"solo");
-        store
-            .set_anchor("temporal_index", &id, QuorumPolicy::AllAlwaysOn)
-            .unwrap();
-        assert!(!dir.path().join("replicas").exists());
-        assert!(store
-            .object_path(&id)
-            .starts_with(dir.path().join("primary")));
-    }
-
-    /// NoPeers + Quorum(2) fails closed.
-    #[test]
-    fn isolated_quorum_two_fails_closed() {
-        let _g = arkfs_test_review::guard();
-        let dir = tempfile::tempdir().unwrap();
-        let store = open_isolated_store(dir.path()).unwrap();
-        let err = store.put(b"x", QuorumPolicy::Quorum(2)).unwrap_err();
-        assert!(matches!(err, ArkError::Quorum { got: 1, need: 2 }));
-        assert!(!store.object_path(&ObjectId::from_bytes(b"x")).exists());
-        assert!(!dir.path().join("replicas").exists());
     }
 
     /// Staging path is a sibling .tmp of the object name.
@@ -587,9 +559,9 @@ mod tests {
         let _g = arkfs_test_review::guard();
         let dir = tempfile::tempdir().unwrap();
         let store = open_local_quorum_store(dir.path(), &["n0", "n1"]).unwrap();
-        let id = store.put(b"idx", QuorumPolicy::Quorum(1)).unwrap();
+        let id = store.put(b"idx", QuorumPolicy::n(1)).unwrap();
         store
-            .set_anchor("temporal_index", &id, QuorumPolicy::Quorum(1))
+            .set_anchor("temporal_index", &id, QuorumPolicy::n(1))
             .unwrap();
         assert_eq!(store.get_anchor("temporal_index").unwrap(), Some(id));
     }

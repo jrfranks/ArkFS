@@ -1,6 +1,10 @@
 defmodule SimRunner.CLI do
   @moduledoc """
-  Escript entry (`mix.exs` `escript: [main_module: SimRunner.CLI]`).
+  CLI for the scenario catalog (sim/test, not a FUSE release).
+
+  `make test` runs ExUnit. `make sim` builds this escript and runs the catalog
+  (needs Mix). Optional portable ERTS bundle: `make sim-standalone` /
+  `make install-sim`.
 
   Prints one line per scenario and exits 1 if any harness or oracle fails.
   Arguments are ignored; the catalog is `SimRunner.scenarios/0`.

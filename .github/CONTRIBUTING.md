@@ -11,6 +11,10 @@ make test          # package tests (does not install Kani)
 make fmt
 make ci            # GitHub: fmt + package tests only (no proof tools)
 make prepush       # all tests + clippy + Kani + Miri + llvm-cov (git push hook)
+make test          # cargo test (debug) + mix test
+make sim           # Elixir scenario catalog (escript; needs Mix)
+make release       # optimized arkfs ELF only
+make install       # arkfs to $(PREFIX)/bin (no Mix)
 ```
 
 Libraries live under `libs/`; runnable apps under `apps/`. There is no Mix umbrella.

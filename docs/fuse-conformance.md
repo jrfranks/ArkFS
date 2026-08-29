@@ -1,7 +1,10 @@
 # FUSE conformance and automated reasoning
 
-Onboarding: [maintainer.md](maintainer.md). This page is the reachability table
-and which tools GitHub vs local pushes run.
+Onboarding: [maintainer.md](maintainer.md). This page is the ArkFS FUSE
+**reachability table** and which tools GitHub vs local pushes run. It is not
+the Linux/libfuse ABI inventory; that (not a test oracle) is
+[conformance/fuse-abi.md](conformance/fuse-abi.md). IPC oracle:
+[conformance/ipc.md](conformance/ipc.md).
 
 Package tests (`make ci`, GitHub) run **without** `/dev/fuse` and **without**
 formal proofs. The FUSE kernel adapter is a thin translator; POSIX behavior is

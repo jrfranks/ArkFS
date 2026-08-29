@@ -5,12 +5,16 @@
 covers the kernel request path, isolation, and live-test skip rules.
 
 ```bash
+make release
+sudo make install            # arkfs only; PREFIX=/usr/local; override PREFIX= / DESTDIR=
 mkdir -p /var/lib/arkfs /mnt/ark
-cargo run -p arkfs -- mount --data /var/lib/arkfs /mnt/ark
+arkfs mount --data /var/lib/arkfs /mnt/ark
 # another terminal:
 ls /mnt/ark
 arkfs umount /mnt/ark
 ```
+
+Dev loop: `cargo run -p arkfs -- mount --data /var/lib/arkfs /mnt/ark`.
 
 `--data` is required. The store is `open_isolated_store` (`NoPeers`,
 `OwnerOnly`): local fsync, no `replicas/` directory.
@@ -46,4 +50,5 @@ nodes as well as regular files.
 CI tests the namespace and open-file cache without `/dev/fuse`. A live mount
 needs `fuse3` (`fusermount3`) and access to `/dev/fuse`.
 
-Conformance and CLI option reach run in `make ci`. The live FUSE scaffold (`tests/fuse_drive.rs`) mounts ArkFS, drives kernel ops, and checks the object store after each step; GitHub skips it (`CI=1`). Local pre-push sets `ARKFS_REQUIRE_FUSE=1`. See [fuse-conformance.md](fuse-conformance.md).
+Conformance and CLI option reach run in `make ci`. The live FUSE scaffold (`tests/fuse_drive.rs`) mounts ArkFS, drives kernel ops, and checks the object store after each step; GitHub skips it (`CI=1`). Local pre-push sets `ARKFS_REQUIRE_FUSE=1`. See [fuse-conformance.md](fuse-conformance.md). Linux/libfuse ABI notes (not a
+test oracle): [conformance/fuse-abi.md](conformance/fuse-abi.md).

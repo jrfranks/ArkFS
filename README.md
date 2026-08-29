@@ -2,7 +2,7 @@
 
 Sovereign continuous temporal distributed file system. Data follows the owner (Earth → Moon → Mars). Never-delete with arbitrary timestamp access. Private clusters. Custom modular code (Elixir orchestration + Rust performance paths).
 
-**New maintainers:** start at [docs/maintainer.md](docs/maintainer.md) (glossary, on-disk layout, request path, tests, traps). Product spec: [SPEC.md](SPEC.md).
+**New maintainers:** start at [docs/maintainer.md](docs/maintainer.md) (glossary, on-disk layout, request path, tests, traps). Product spec: [SPEC.md](SPEC.md). IPC test oracle: [docs/conformance/ipc.md](docs/conformance/ipc.md).
 
 ## Organization
 
@@ -67,12 +67,20 @@ sudo usermod -aG fuse "$USER"
 You do **not** need `user_allow_other` in `/etc/fuse.conf` for `arkfs` (the mount does not pass `allow_other`).
 
 ```bash
+make test                    # cargo test (debug) + mix test
+make sim                     # Elixir scenario catalog (escript; needs Mix)
+make release                 # target/release/arkfs only
+sudo make install            # /usr/local/bin/arkfs (no Mix)
+# or: make install PREFIX=/usr DESTDIR=/tmp/stage
+
 mkdir -p /var/lib/arkfs /mnt/ark
-cargo run -p arkfs -- mount --data /var/lib/arkfs /mnt/ark
+arkfs mount --data /var/lib/arkfs /mnt/ark
 # other terminal:
 ls /mnt/ark
-cargo run -p arkfs -- umount /mnt/ark
+arkfs umount /mnt/ark
 ```
+
+Dev loop without installing: `cargo run -p arkfs -- mount --data /var/lib/arkfs /mnt/ark`.
 
 ### macOS
 

@@ -9,10 +9,7 @@ use persistent_object_store::open_local_quorum_store;
 fn core() -> (tempfile::TempDir, TemporalCore) {
     let dir = tempfile::tempdir().unwrap();
     let store = open_local_quorum_store(dir.path(), &["n0", "n1"]).unwrap();
-    (
-        dir,
-        TemporalCore::open(store, QuorumPolicy::Quorum(1)).unwrap(),
-    )
+    (dir, TemporalCore::open(store, QuorumPolicy::n(1)).unwrap())
 }
 
 /// commit_branch then lookup_current returns the bytes and size.
@@ -240,7 +237,7 @@ fn index_survives_reopen() {
     let dir = tempfile::tempdir().unwrap();
     {
         let store = open_local_quorum_store(dir.path(), &["n0", "n1"]).unwrap();
-        let tc = TemporalCore::open(store, QuorumPolicy::Quorum(1)).unwrap();
+        let tc = TemporalCore::open(store, QuorumPolicy::n(1)).unwrap();
         tc.commit_branch(BranchDelta {
             path: "/p".into(),
             content: Some(b"persist".to_vec()),
@@ -257,7 +254,7 @@ fn index_survives_reopen() {
         .unwrap();
     }
     let store = open_local_quorum_store(dir.path(), &["n0", "n1"]).unwrap();
-    let tc = TemporalCore::open(store, QuorumPolicy::Quorum(1)).unwrap();
+    let tc = TemporalCore::open(store, QuorumPolicy::n(1)).unwrap();
     let h = tc.lookup_current("/p").unwrap();
     assert_eq!(tc.read_content(&h).unwrap(), b"persist2");
     assert_eq!(h.attrs.file_id, 1);
@@ -596,14 +593,14 @@ fn lookup_ino_map_survives_reopen() {
     let ino;
     {
         let store = open_local_quorum_store(dir.path(), &["n0", "n1"]).unwrap();
-        let tc = TemporalCore::open(store, QuorumPolicy::Quorum(1)).unwrap();
+        let tc = TemporalCore::open(store, QuorumPolicy::n(1)).unwrap();
         tc.ensure_root().unwrap();
         let h = tc.create_file("/", "p", 0o644, 0, 0).unwrap();
         ino = h.attrs.file_id;
         tc.rename("/p", "/", "q", 0).unwrap();
     }
     let store = open_local_quorum_store(dir.path(), &["n0", "n1"]).unwrap();
-    let tc = TemporalCore::open(store, QuorumPolicy::Quorum(1)).unwrap();
+    let tc = TemporalCore::open(store, QuorumPolicy::n(1)).unwrap();
     assert_eq!(tc.lookup_ino(ino, View::Live).unwrap().path.as_str(), "/q");
 }
 

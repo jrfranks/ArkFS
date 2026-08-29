@@ -105,7 +105,7 @@ Tests: every other module depends on this.
 **2. PersistentObjectStore**  
 Description: Custom object store enforcing “no reply until data is safe”.  
 Full API and diagram as above.  
-QuorumPolicy enum: `Quorum(n)`, `AllAlwaysOn`, `OwnerOnly`.
+QuorumPolicy enum: `Quorum(n)` with `n >= 1`, `AllAlwaysOn`, `OwnerOnly`.
 
 **3. TemporalCore**  
 Full API and diagram as above.  

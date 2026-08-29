@@ -1,6 +1,6 @@
 # Tool install is `make setup` only. Checkout/merge hooks call scripts/setup-tools.sh.
-# `make build` / `make test` / `make all` call setup-hooks so a clone that has
-# not yet run `make setup` still gets `core.hooksPath=.githooks` (push gate).
+# `make build` / `make test` / `make sim` / `make all` / `make release` call
+# setup-hooks so a clone that has not yet run `make setup` still gets hooksPath.
 
 .PHONY: setup setup-hooks setup-tools install-hooks
 
