@@ -296,7 +296,7 @@ impl Default for FileAttributes {
 }
 
 impl FileAttributes {
-        /// Regular file: `nlink = 1`, primary `::$DATA` stream, DOS archive bit.
+    /// Regular file: `nlink = 1`, primary `::$DATA` stream, DOS archive bit.
     ///
     /// Maintainer: file_id may be 0 (allocated later in commit_branch).
     /// See "Inode 0" trap. Primary stream is always present for files.
