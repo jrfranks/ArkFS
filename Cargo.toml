@@ -26,7 +26,7 @@ temporal_core = { path = "libs/rust/temporal_core" }
 fuse_facade = { path = "libs/rust/fuse_facade" }
 arkfs_test_review = { path = "libs/rust/test_review" }
 blake3 = "1.5"
-fuser = { version = "0.15", default-features = false, features = ["abi-7-31"] }
+fuser = { version = "0.17", default-features = false, features = ["abi-7-31"] }
 libc = "0.2"
 serde = { version = "1.0", features = ["derive"] }
 thiserror = "2.0"
