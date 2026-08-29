@@ -63,6 +63,19 @@ Do **not** put filesystem logic in `FuseFs`. That type maps FUSE requests onto
 `ArkSession`. Do **not** put POSIX tree logic in the object store. The store
 only knows bytes and names.
 
+## Code Review Requirements
+
+Every function (public or private) **must** have:
+
+- A **full descriptive `///` doc comment** (or `//` block for tiny helpers) explaining what it does, its preconditions/postconditions, and how it fits the never-delete temporal model.
+- At least one **maintainer hint** — a comment referencing the relevant rule, trap, or mental model from this document. Example:
+  ```rust
+  // Maintainer: must assign fresh `file_id` when attrs still contain 0 (Inode 0 trap).
+  // Maintainer: always use `merge_from_*` — never wholesale replace `FileAttributes` (Partial setattr trap).
+  ```
+
+Reviewers must reject changes that add or modify a function without both a complete description and maintainer hint(s).
+
 ## Glossary
 
 These words show up in comments and types. Use them consistently.
@@ -342,7 +355,10 @@ fail-fast, not a forgotten error path.
 
 ## Common maintenance traps
 
-These are easy to get wrong. Check them in review.
+These are the most common sources of subtle correctness or durability bugs.
+**Every function touching these areas must include a maintainer hint** (see Code Review Requirements above).
+
+These are easy to get wrong. Check them in every review.
 
 1. **Inode 0.** `commit_branch` must assign a new `file_id` when attrs still
    have 0 (including after a tombstone). FUSE treats nodeid 0 as ENOENT.
@@ -378,7 +394,7 @@ These are easy to get wrong. Check them in review.
 
 ## Reading order for a first week
 
-1. This file.
+1. This file (especially **Code Review Requirements** and **Common maintenance traps**).
 2. [phase0.md](phase0.md) — what Phase 0 delivered.
 3. `arkfs_core/src/id.rs` (`PathKey`, `ObjectId`) and `error.rs`.
 4. `persistent_object_store/src/lib.rs` (`put` / `require_quorum`).

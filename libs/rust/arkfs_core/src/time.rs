@@ -9,6 +9,9 @@ use crate::attributes::Timespec;
 use serde::{Deserialize, Serialize};
 
 /// Hybrid timestamp: logical counter for distributed order + wall-clock for protocols/UI.
+///
+/// Maintainer: stored per VersionRecord. Ord is (logical, wall). Used for
+/// Live/AsOf and commit conflict checks. Never trust wall alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Timestamp {
     /// Monotonic logical component (Lamport-style / HLC logical).
@@ -18,12 +21,16 @@ pub struct Timestamp {
 }
 
 impl Timestamp {
+    /// The zero timestamp. Used as initial max seed for clock.
     pub const ZERO: Timestamp = Timestamp {
         logical: 0,
         wall_nanos: 0,
     };
 
     /// Timestamp from logical tick + wall nanos.
+    ///
+    /// Maintainer: prefer tick() / merge() / observe() for advancing.
+    /// Direct use is mostly for --as-of and tests.
     pub fn new(logical: u64, wall_nanos: u64) -> Self {
         Timestamp {
             logical,
@@ -32,6 +39,8 @@ impl Timestamp {
     }
 
     /// Next event on this node: `logical + 1`, wall = max(now, previous wall).
+    ///
+    /// Maintainer: guarantees per-node monotonic logical. See TemporalCore::tick.
     pub fn tick(self, wall_nanos: u64) -> Self {
         Timestamp {
             logical: self.logical.saturating_add(1),
@@ -40,6 +49,8 @@ impl Timestamp {
     }
 
     /// Happens-after both `self` and `other` (max logical + 1, max wall).
+    ///
+    /// Maintainer: used when incorporating observed remote timestamps.
     pub fn merge(self, other: Timestamp) -> Timestamp {
         Timestamp {
             logical: self.logical.max(other.logical).saturating_add(1),
@@ -48,6 +59,9 @@ impl Timestamp {
     }
 
     /// Protocol-facing wall time (drops the logical component).
+    ///
+    /// Maintainer: for atime/mtime/ctime projection to FUSE etc. Loses ordering
+    /// info. See "to_timespec".
     pub fn to_timespec(self) -> Timespec {
         Timespec::from_nanos(self.wall_nanos)
     }

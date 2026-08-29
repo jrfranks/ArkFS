@@ -12,15 +12,27 @@ use serde::{Deserialize, Serialize};
 use std::num::NonZeroU32;
 
 /// Replication / durability policy for safe-write.
+///
+/// Maintainer: the store always adds +1 for the local durable write.
+/// `always_on` passed to these methods already includes local.
+/// OwnerOnly (single-node FUSE) + NoPeers backend gives always_on=1.
+/// n > 1 with zero remotes must fail closed (see require_quorum).
+/// See "Quorum", "OwnerOnly", "QuorumPolicy::n(k)", "Safe-write contract".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum QuorumPolicy {
     /// Require acknowledgment from `n` copies (local durable write counts as one).
     ///
     /// `n` is [`NonZeroU32`]: a zero requirement is not a quorum.
+    ///
+    /// Maintainer: n==0 is a panic in the constructor (not a valid policy).
+    /// See "k == 0 is not a policy".
     Quorum(NonZeroU32),
     /// Require all currently always-on copies (including local).
     AllAlwaysOn,
     /// Durable only on the owner node.
+    ///
+    /// Maintainer: the FUSE default. Pairs with NoPeers backend.
+    /// See "OwnerOnly" and open_isolated_store.
     OwnerOnly,
 }
 
@@ -31,6 +43,9 @@ impl QuorumPolicy {
     ///
     /// If `n == 0`. Use [`Self::OwnerOnly`] or [`Self::AllAlwaysOn`] when the
     /// need is not a fixed positive count.
+    ///
+    /// Maintainer: see "QuorumPolicy::n(k) with k > 1 and zero remotes must
+    /// fail closed". The constructor enforces n >= 1.
     #[track_caller]
     pub const fn n(n: u32) -> Self {
         match NonZeroU32::new(n) {
@@ -40,6 +55,9 @@ impl QuorumPolicy {
     }
 
     /// `always_on` is reachable copies **including** the local write.
+    ///
+    /// Maintainer: this returns the number required, not min(n, always_on).
+    /// See test "quorum_n_is_not_capped_at_always_on".
     pub fn required_acks(self, always_on: u32) -> u32 {
         match self {
             QuorumPolicy::Quorum(n) => n.get(),
@@ -49,6 +67,9 @@ impl QuorumPolicy {
     }
 
     /// `total_acks` is local (1) plus remote `replicate_*` return value.
+    ///
+    /// Maintainer: called by require_quorum after adding local +1.
+    /// Failure path must discard staging for new objects.
     pub fn is_satisfied(self, total_acks: u32, always_on: u32) -> bool {
         total_acks >= self.required_acks(always_on)
     }

@@ -18,6 +18,11 @@
 //!
 //! This is **not** serde/JSON. The types derive Serialize for tests and
 //! harness snapshots; on-disk truth is this codec.
+//!
+//! Maintainer: this is the on-disk truth for FileAttributes and the temporal
+//! index. Any change must preserve round-trips for old data (see decode_v1
+//! handling in index). Checksums are verified on get and verify_integrity.
+//! See "codec", "ARKA1", "ARKIDX2".
 
 use crate::attributes::{
     AceAccess, AceFlags, AceType, AclEntry, DosFlags, FileAttributes, FileType, MacOsFlags,

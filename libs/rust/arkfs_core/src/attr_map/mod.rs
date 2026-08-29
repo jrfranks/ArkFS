@@ -9,6 +9,11 @@
 //!
 //! Never `*attrs = FileAttributes::from(protocol_struct)` — that zeros SMB/macOS
 //! fields on a FUSE chmod. Tests in this module are the regression net.
+//!
+//! Maintainer: this is the enforcement point for "Partial setattr" trap.
+//! All setattr paths (FUSE, NFS, SMB, WebDAV, macOS) must go through the
+//! merge_from_* helpers. See "Partial setattr", "attr_map", and "canonical
+// FileAttributes".
 
 mod fuse;
 mod macos;

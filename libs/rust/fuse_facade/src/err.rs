@@ -2,6 +2,9 @@
 //!
 //! Integrity and quorum failures become `EIO` (the kernel cannot distinguish
 //! “bit flip” from “disk died”). `Conflict` becomes `EPERM`.
+//!
+//! Maintainer: this must be a total match over ArkError. Adding a variant
+//! without a case here is a compile error. See "to_errno" and ArkError docs.
 
 use arkfs_core::ArkError;
 use libc::{
@@ -10,6 +13,9 @@ use libc::{
 };
 
 /// Map a library error to the errno the kernel expects on the FUSE reply.
+///
+/// Maintainer: keep in sync with all_errno_pairs() test. Integrity/Quorum → EIO.
+/// Conflict → EPERM (not a direct POSIX equivalent for our use).
 pub fn to_errno(err: &ArkError) -> i32 {
     match err {
         ArkError::NotFound { .. } => ENOENT,

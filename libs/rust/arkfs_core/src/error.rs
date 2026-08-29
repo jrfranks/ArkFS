@@ -7,6 +7,11 @@
 //! Constructors take `impl Into<String>` so call sites can pass `&str` or
 //! `String` without `.to_string()` noise. Prefer constructors over building
 //! variants by hand so display text stays consistent.
+//!
+//! Maintainer: every variant must have a mapping in to_errno. Integrity and
+//! Quorum both map to EIO (kernel cannot distinguish). Conflict maps to EPERM.
+//! See "ArkError", "to_errno", and "GitHub vs local" (some errors only
+//! exercised in local prepush).
 
 use std::io;
 use thiserror::Error;

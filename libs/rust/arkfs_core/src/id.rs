@@ -20,16 +20,25 @@ pub const NAME_MAX: usize = 255;
 /// content). The public field is the raw 32 bytes; prefer `from_bytes` /
 /// `from_hex` over constructing `ObjectId([...])` except when reading an
 /// already-validated anchor.
+///
+/// Maintainer: filename is always lowercase hex + ".obj". Identity is purely
+/// content hash. See "CAS", "ObjectId", "Safe-write contract".
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ObjectId(pub [u8; 32]);
 
 impl ObjectId {
     /// Hash `data` with unkeyed BLAKE3. This is the store's object name.
+    ///
+    /// Maintainer: the canonical way to obtain an id for new content. Used by
+    /// PersistentObjectStore::put before any write. Idempotent for identical data.
     pub fn from_bytes(data: &[u8]) -> Self {
         ObjectId(*blake3::hash(data).as_bytes())
     }
 
     /// Domain-separated id: BLAKE3 keyed hash with a key derived from `label`.
+    ///
+    /// Maintainer: used to avoid collisions between different roles that might
+    /// hash the same bytes (e.g. attrs vs content). Label is domain separated.
     pub fn from_labeled(label: &[u8], data: &[u8]) -> Self {
         let mut key_hasher = blake3::Hasher::new_derive_key("arkfs ObjectId from_labeled v1");
         key_hasher.update(label);
@@ -38,11 +47,17 @@ impl ObjectId {
     }
 
     /// Raw 32-byte BLAKE3 digest.
+    ///
+    /// Maintainer: prefer to_hex / from_hex for serialization. Raw bytes are
+    /// stored in anchors (temporal_index).
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
 
     /// Lowercase 64-char hex. Object files are `{to_hex()}.obj`.
+    ///
+    /// Maintainer: canonical on-disk name format. Must be lowercase.
+    /// See "ObjectId" and persistent_object_store layout.
     pub fn to_hex(&self) -> String {
         let mut s = String::with_capacity(64);
         for b in &self.0 {
@@ -53,6 +68,9 @@ impl ObjectId {
     }
 
     /// Inverse of [`Self::to_hex`]. Rejects wrong length and non-hex digits.
+    ///
+    /// Maintainer: strict validation. Used when reading anchors and object
+    /// paths from disk. Bad input is InvalidArgument (not silent).
     pub fn from_hex(s: &str) -> Result<Self, ArkError> {
         let bytes = s.as_bytes();
         if bytes.len() != 64 {
@@ -67,6 +85,9 @@ impl ObjectId {
 }
 
 /// One ASCII hex digit → 0..15.
+///
+/// Maintainer: helper for from_hex. Invalid digit is InvalidArgument.
+/// Must match the encoding in to_hex.
 fn hex_nibble(c: u8) -> Result<u8, ArkError> {
     match c {
         b'0'..=b'9' => Ok(c - b'0'),
@@ -99,11 +120,18 @@ impl fmt::Display for ObjectId {
 /// [`new`](Self::new) is **unchecked** — only for index decode of already
 /// stored keys. FUSE names go through `join` so a slash in a component is
 /// `InvalidArgument`, not a surprising nested path.
+///
+/// Maintainer: always use parse() or join() for user input. Never construct
+/// raw paths. Directory rename uses rebase() to retarget every descendant.
+/// See "PathKey", "Directory rename" trap, and "readdir is a prefix scan".
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct PathKey(pub String);
 
 impl PathKey {
     /// Canonical `/`.
+    ///
+    /// Maintainer: root inode is always 1. Root has no parent. See ensure_root
+    /// and "FUSE root is always inode 1".
     pub fn root() -> Self {
         PathKey("/".into())
     }
@@ -114,11 +142,18 @@ impl PathKey {
     }
 
     /// Unchecked constructor for already-canonical keys (index decode).
+    ///
+    /// Maintainer: only for loading from durable index (decode). Callers that
+    /// receive paths from FUSE or users must go through parse(). See "PathKey::new".
     pub fn new(path: impl Into<String>) -> Self {
         PathKey(path.into())
     }
 
     /// Absolute path without `.` / `..` / NUL. Trailing slashes stripped except `/`.
+    ///
+    /// Maintainer: the one true way to accept paths from FUSE/user. Rejects
+    /// relative, NUL, . and .. . Used everywhere before touching the index.
+    /// See "PathKey::parse" and prepare_create.
     pub fn parse(path: impl AsRef<str>) -> Result<Self, ArkError> {
         let s = path.as_ref();
         if s.is_empty() || !s.starts_with('/') {
@@ -151,11 +186,16 @@ impl PathKey {
     }
 
     /// Canonical path string (always starts with `/`).
+    ///
+    /// Maintainer: the normalized form stored in the index. Always use this
+    /// for map keys. See "PathKey".
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
     /// Final component (`"/"` for root, `"c"` for `"/a/b/c"`).
+    ///
+    /// Maintainer: used for readdir entry names and basename logic.
     pub fn name(&self) -> &str {
         if self.is_root() {
             "/"
@@ -165,6 +205,9 @@ impl PathKey {
     }
 
     /// Parent directory, or `None` at root (root has no parent in this model).
+    ///
+    /// Maintainer: root has no parent. Used in rename and directory logic.
+    /// See "parent" and prepare_create.
     pub fn parent(&self) -> Option<PathKey> {
         if self.is_root() {
             return None;
@@ -176,6 +219,9 @@ impl PathKey {
     }
 
     /// Append one component. `name` must not contain `/`, NUL, `.`, or `..`.
+    ///
+    /// Maintainer: the safe way to build child paths from FUSE. Rejects
+    /// anything that would break the PathKey invariant. See "join".
     pub fn join(&self, name: &str) -> Result<PathKey, ArkError> {
         if name.is_empty()
             || name.contains('/')
@@ -196,6 +242,10 @@ impl PathKey {
     }
 
     /// True if `self` is `prefix` or a descendant (`prefix/...`).
+    ///
+    /// Maintainer: used for readdir prefix scans and rename safety checks
+    /// ("cannot rename into a descendant"). Root is special (everything under
+    /// it except itself). See "is_under" and readdir.
     pub fn is_under(&self, prefix: &PathKey) -> bool {
         if self == prefix {
             return true;
@@ -207,6 +257,11 @@ impl PathKey {
     }
 
     /// Rewrite `from` (or `from/...`) to `to` (or `to/...`). `None` if not under `from`.
+    ///
+    /// Maintainer: the core of directory rename and exchange. Every live
+    /// descendant under `from` is rebased to under `to` in one persist.
+    /// See "Directory rename" trap and rename_tree/exchange_tree.
+    /// Must be used together with tombstoning old locations.
     pub fn rebase(&self, from: &PathKey, to: &PathKey) -> Option<PathKey> {
         if self == from {
             return Some(to.clone());
@@ -226,6 +281,10 @@ impl PathKey {
     }
 
     /// Immediate child name if `child` is a direct child of `self`.
+    ///
+    /// Maintainer: readdir is implemented as a scan using this. Returns
+    /// only direct children (no nested /). Root special-cases the prefix.
+    /// See "readdir" and DurableIndex::live_children.
     pub fn immediate_child<'a>(&self, child: &'a PathKey) -> Option<&'a str> {
         if self.is_root() {
             let rest = child.as_str().strip_prefix('/')?;

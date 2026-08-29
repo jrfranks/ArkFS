@@ -16,8 +16,12 @@ pub const ACCESS_W: u32 = 2;
 pub const ACCESS_R: u32 = 4;
 
 /// Directory sticky bit (`S_ISVTX`). Unlink/rename of someone else's name is denied.
+///
+/// Maintainer: checked in require_dir_write via sticky_allows_unlink.
 pub const MODE_STICKY: u32 = 0o1000;
 /// Set-group-ID (`S_ISGID`). New children inherit the directory gid.
+///
+/// Maintainer: applied in inherit_from_parent for mkdir/create.
 pub const MODE_SETGID: u32 = 0o2000;
 
 /// True when `caller_uid`/`caller_gid` may use `mask` on a file with these bits.
@@ -27,6 +31,9 @@ pub const MODE_SETGID: u32 = 0o2000;
 ///   execute bit is set (`mode & 0o111`).
 /// - Otherwise owner / group / other class is chosen, then the requested
 ///   bits must all be present in that class.
+///
+/// Maintainer: used by ArkSession::require_mode for FUSE open/lookup/access.
+/// Root (uid 0) is special only for caller_uid. See "Unix permission bits".
 pub fn unix_access(
     mode: u32,
     file_uid: u32,
@@ -94,6 +101,9 @@ pub fn sticky_allows_unlink(
 }
 
 /// Apply `umask` to permission bits (type bits in `S_IFMT` are left to the caller).
+///
+/// Maintainer: called during create/mkdir/mknod before storing mode.
+/// Result is always masked to 0o7777.
 pub fn apply_umask(mode: u32, umask: u32) -> u32 {
     mode & !umask & 0o7777
 }

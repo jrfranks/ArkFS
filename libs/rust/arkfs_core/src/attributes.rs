@@ -161,8 +161,11 @@ pub struct NamedStream {
 }
 
 impl NamedStream {
+    /// Primary data stream name.
     pub const PRIMARY: &'static str = "::$DATA";
+    /// macOS resource fork stream name.
     pub const RESOURCE_FORK: &'static str = "com.apple.ResourceFork";
+    /// Legacy macOS resource fork name.
     pub const RESOURCE_FORK_LEGACY: &'static str = "..namedfork/rsrc";
 }
 
@@ -293,7 +296,10 @@ impl Default for FileAttributes {
 }
 
 impl FileAttributes {
-    /// Regular file: `nlink = 1`, primary `::$DATA` stream, DOS archive bit.
+        /// Regular file: `nlink = 1`, primary `::$DATA` stream, DOS archive bit.
+    ///
+    /// Maintainer: file_id may be 0 (allocated later in commit_branch).
+    /// See "Inode 0" trap. Primary stream is always present for files.
     pub fn new_file(file_id: u64, mode: u32) -> Self {
         let mut a = FileAttributes {
             file_id,
@@ -306,6 +312,9 @@ impl FileAttributes {
     }
 
     /// Directory: `nlink = 2`, no streams (children live in the path index).
+    ///
+    /// Maintainer: file_id may be 0 at creation time (Inode 0 trap).
+    /// nlink for directories is derived at read time (2 + live subdirs).
     pub fn new_dir(file_id: u64, mode: u32) -> Self {
         FileAttributes {
             file_id,
@@ -322,17 +331,25 @@ impl FileAttributes {
     }
 
     /// Bump the monotonic change attribute (NFSv4 / cache coherence).
+    ///
+    /// Maintainer: must be called on any metadata mutation that should be
+    /// visible as a change to NFSv4 clients. See "change_attr".
     pub fn bump_change(&mut self) {
         self.change_attr = self.change_attr.saturating_add(1);
     }
 
     /// Bump change_attr and set ctime to `now` (POSIX-style metadata change).
+    ///
+    /// Maintainer: used on setattr paths and commit_branch. See "touch_change".
     pub fn touch_change(&mut self, now: Timespec) {
         self.bump_change();
         self.ctime = now;
     }
 
     /// The ::$DATA stream, if present (directories have none).
+    ///
+    /// Maintainer: files always have a primary stream. Directories have none
+    /// (children are in the path index). Used by set_logical_size and codec.
     pub fn primary_stream_mut(&mut self) -> Option<&mut NamedStream> {
         self.streams
             .iter_mut()
@@ -351,6 +368,9 @@ impl FileAttributes {
     }
 
     /// Apply a partial POSIX setattr. Unset `Option`s are left unchanged.
+    ///
+    /// Maintainer: this is the low-level apply; the higher level must still
+    /// use merge_from_fuse etc. for cross-protocol safety. See "Partial setattr".
     pub fn apply_posix(&mut self, patch: &PosixPatch, now: Timespec, size: SizePolicy) {
         if let Some(mode) = patch.mode {
             self.mode = mode & 0o7777;

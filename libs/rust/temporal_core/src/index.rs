@@ -18,6 +18,10 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 /// One cactus node for a path. `parent` is the index in `versions` (not a file_id).
+///
+/// Maintainer: `file_id` is the inode identity. `parent` links versions for
+/// this path only (cactus per-path). Tombstone versions hide live names but
+/// keep prior bytes. See "Cactus stack", "Tombstone", "Inode / file_id".
 #[derive(Debug, Clone)]
 pub struct VersionRecord {
     pub content_id: ObjectId,
@@ -30,6 +34,9 @@ pub struct VersionRecord {
 }
 
 /// Ordered versions for one path. Last element is the live/as-of candidate.
+///
+/// Maintainer: versions are append-only per path. Last is candidate for Live.
+/// AsOf walks backwards. Never mutate in place after publish.
 #[derive(Debug, Clone, Default)]
 pub struct PathHistory {
     pub versions: Vec<VersionRecord>,
@@ -42,6 +49,10 @@ pub const INDEX_MAGIC_V2: &[u8] = b"ARKIDX2";
 ///
 /// `ino_to_path` is derived from live `file_id`s (not encoded). Hard links keep
 /// the lexicographically first path (BTreeMap order), matching [`Self::find_ino`].
+///
+/// Maintainer: never store file_id == 0. next_file_id must always be >= 2 after
+/// root is created. Rebuild_ino_map is called after every persist_index.
+/// See "Inode 0" trap and "next_file_id".
 #[derive(Debug, Clone, Default)]
 pub struct DurableIndex {
     pub next_file_id: u64,
@@ -52,6 +63,9 @@ pub struct DurableIndex {
 }
 
 /// Encode as `ARKIDX2`. No checksum trailer; integrity is the object's ObjectId.
+///
+/// Maintainer: always write V2. V1 is read-only legacy (file_id=0, no tombstone).
+/// See "INDEX_MAGIC" and decode_v1. Never emit ARKIDX1.
 pub fn encode_index(idx: &DurableIndex) -> Vec<u8> {
     let mut w = Writer::with_magic(INDEX_MAGIC_V2);
     w.u64(idx.next_file_id);
@@ -85,6 +99,9 @@ pub fn decode_index(data: &[u8]) -> Result<DurableIndex, ArkError> {
 }
 
 /// Current on-disk format. `file_id` and tombstone are required.
+///
+/// Maintainer: must call rebuild_ino_map after decode. V2 is the only
+/// format we write. See decode_index and "ARKIDX2".
 fn decode_v2(data: &[u8]) -> Result<DurableIndex, ArkError> {
     let mut r = Reader::new(data);
     r.expect_magic(INDEX_MAGIC_V2)?;
@@ -116,6 +133,10 @@ fn decode_v2(data: &[u8]) -> Result<DurableIndex, ArkError> {
 }
 
 /// Read-only legacy: live file, `file_id = 0`. Do not write V1.
+///
+/// Maintainer: only for reading old indexes. Decoded records have file_id=0
+/// and tombstone=false. Upgrade path creates new V2 records on next write.
+/// See "decode_v1" and Inode 0 handling in commit_branch.
 fn decode_v1(data: &[u8]) -> Result<DurableIndex, ArkError> {
     let mut r = Reader::new(data);
     r.expect_magic(INDEX_MAGIC_V1)?;
@@ -147,6 +168,9 @@ fn decode_v1(data: &[u8]) -> Result<DurableIndex, ArkError> {
 }
 
 /// FileType → ARKIDX2 u8 tag.
+///
+/// Maintainer: must stay in sync with decode_file_type. Unknown on decode
+/// is treated as Integrity (fail closed).
 fn encode_file_type(t: FileType) -> u8 {
     match t {
         FileType::File => 0,
@@ -161,6 +185,9 @@ fn encode_file_type(t: FileType) -> u8 {
 }
 
 /// ARKIDX2 u8 tag → FileType. Unknown is Integrity.
+///
+/// Maintainer: must round-trip with encode_file_type. Bad tag = Integrity error
+/// (fail closed). See decode_v2.
 fn decode_file_type(t: u8) -> Result<FileType, ArkError> {
     match t {
         0 => Ok(FileType::File),
@@ -177,6 +204,10 @@ fn decode_file_type(t: u8) -> Result<FileType, ArkError> {
 
 impl VersionRecord {
     /// Same CAS ids and file identity; new cactus parent / tombstone bit.
+    ///
+    /// Maintainer: used for hard-link fan-out and rename/exchange tombstones.
+    /// Preserves content/attrs/file_id/type. Only parent and tombstone change.
+    /// See "hard link" semantics and rename_tree/exchange_tree.
     pub(crate) fn continue_as(&self, at: Timestamp, parent: Option<u32>, tombstone: bool) -> Self {
         VersionRecord {
             content_id: self.content_id,
@@ -192,6 +223,10 @@ impl VersionRecord {
 
 impl PathHistory {
     /// Live = last version (caller checks tombstone). AsOf = last `at <= ts`.
+    ///
+    /// Maintainer: AsOf returns the last version whose timestamp is <= the
+    /// query time even if later tombstones exist. Tombstone check is done by
+    /// the caller (lookup_key). See "View" and "record_in_view".
     pub(crate) fn record_in_view(&self, view: View) -> Option<&VersionRecord> {
         match view {
             View::Live => self.versions.last(),
@@ -202,6 +237,9 @@ impl PathHistory {
 
 impl DurableIndex {
     /// Greatest `at` across every version. Used to seed the clock on reopen.
+    ///
+    /// Maintainer: seed for TemporalCore clock on open. Used for conflict checks
+    /// and --as-of. See "Logical time" and open().
     pub(crate) fn max_timestamp(&self) -> Timestamp {
         let mut max = Timestamp::ZERO;
         for hist in self.paths.values() {
@@ -215,12 +253,18 @@ impl DurableIndex {
     }
 
     /// Append `rec` as the newest cactus node for `path` (creates the history if needed).
+    ///
+    /// Maintainer: this mutates the in-memory snapshot. persist_index will
+    /// encode + put + set_anchor. See commit_branch and persist_index.
     pub(crate) fn push(&mut self, path: PathKey, rec: VersionRecord) {
         let hist = self.paths.entry(path).or_default();
         Arc::make_mut(hist).versions.push(rec);
     }
 
     /// Index of the current last version, to store as the next record's `parent`.
+    ///
+    /// Maintainer: parent indexes form the per-path cactus. Used in
+    /// commit_branch and tombstone. See VersionRecord::parent.
     pub(crate) fn version_parent(&self, path: &PathKey) -> Option<u32> {
         self.paths.get(path).and_then(|h| {
             let n = h.versions.len();
@@ -229,6 +273,9 @@ impl DurableIndex {
     }
 
     /// Last cactus node for `path`, including a tombstone. `None` if the path never existed.
+    ///
+    /// Maintainer: includes tombstones. Callers that want live data should use
+    /// last_live. Used by tombstone() and conflict checks.
     pub(crate) fn last(&self, path: &PathKey) -> Option<&VersionRecord> {
         self.paths.get(path).and_then(|h| h.versions.last())
     }
@@ -262,6 +309,10 @@ impl DurableIndex {
     }
 
     /// First live path in `view` whose `file_id` is `ino`. Hard links: BTreeMap order.
+    ///
+    /// Maintainer: for Live we use the derived ino_to_path map (O(1)). For AsOf
+    /// we fall back to a scan in lookup_ino. Hard links pick the lex-first path.
+    /// See "Inode / file_id" and lookup_ino.
     pub(crate) fn find_ino(&self, ino: u64, view: View) -> Option<PathKey> {
         for (path, hist) in &self.paths {
             if let Some(rec) = hist.record_in_view(view) {
@@ -274,6 +325,10 @@ impl DurableIndex {
     }
 
     /// POSIX `st_nlink` for `rec` at `path` in `view` (not stored on the attr object).
+    ///
+    /// Maintainer: directories start at 2 (`.` and `..`) + live subdirs.
+    /// Regular files = count of live paths sharing the file_id (hard links).
+    /// nlink is derived, never stored in FileAttributes. See link_count.
     pub(crate) fn nlink(&self, rec: &VersionRecord, path: &PathKey, view: View) -> u32 {
         if rec.file_type == FileType::Directory {
             let mut n = 2u32;
@@ -301,6 +356,10 @@ impl DurableIndex {
     }
 
     /// Rebuild live inode and children maps. Call after mutating `paths`.
+    ///
+    /// Maintainer: must be called after every mutation that affects live
+    /// entries before persist_index. Populates ino_to_path (for Live O(1)
+    /// lookup) and live_children (for readdir). See "rebuild_ino_map".
     pub(crate) fn rebuild_ino_map(&mut self) {
         self.ino_to_path.clear();
         self.live_children.clear();
@@ -327,6 +386,9 @@ impl DurableIndex {
     }
 
     /// Count of live (non-tombstone) paths. Used by FUSE `statfs`.
+    ///
+    /// Maintainer: O(live paths). Does not count tombstones. See
+    /// TemporalCore::live_path_count and statfs.
     pub(crate) fn live_path_count(&self) -> u64 {
         self.paths
             .values()
@@ -335,6 +397,10 @@ impl DurableIndex {
     }
 
     /// Other live names of `file_id` (excludes `except`). Used to fan out writes.
+    ///
+    /// Maintainer: hard-link fan-out on write/replace_content/commit_branch.
+    /// Excludes the primary path being written so it is not duplicated.
+    /// See "Open-file cache is per-inode" and replace_content.
     pub(crate) fn live_siblings(&self, file_id: u64, except: &PathKey) -> Vec<PathKey> {
         self.paths
             .iter()

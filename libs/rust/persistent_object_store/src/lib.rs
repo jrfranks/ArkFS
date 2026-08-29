@@ -55,14 +55,27 @@ impl IntegrityReport {
 ///
 /// Return values are **remote** acks only (not including local). [`NoPeers`]
 /// returns `Ok(0)` and `always_on_count() == 0`.
+///
+/// Maintainer: implementations must be side-effect free on failure for the
+/// primary path. Local write always counts as +1 in require_quorum.
+/// See "Quorum and isolation" and "Safe-write contract" in maintainer.md.
 pub trait ReplicationBackend: Send + Sync {
     /// Replicate object bytes to peers. Returns successful remote acks.
+    ///
+    /// Maintainer: must not create replica dirs for isolated FUSE (use NoPeers).
+    /// Return 0 for no-peers backends. See open_isolated_store and NoPeers.
     fn replicate_object(&self, id: &ObjectId, data: &[u8]) -> Result<u32, ArkError>;
 
     /// Replicate a named root pointer (32-byte object id).
+    ///
+    /// Maintainer: same durability rules as replicate_object. Used for the
+    /// temporal_index anchor.
     fn replicate_anchor(&self, name: &str, id_bytes: &[u8; 32]) -> Result<u32, ArkError>;
 
     /// Currently reachable remote replicas (not including the local primary).
+    ///
+    /// Maintainer: used in require_quorum to compute always_on + 1.
+    /// For OwnerOnly single-node FUSE this must return 0.
     fn always_on_count(&self) -> u32;
 }
 
@@ -87,6 +100,10 @@ impl ReplicationBackend for NoPeers {
 }
 
 /// Primary at `base/primary`. No replica directories, no peer I/O.
+///
+/// Maintainer: for single-node FUSE. Uses NoPeers so replicate_* returns 0
+/// and always_on_count is 0. Enforces OwnerOnly semantics. See "OwnerOnly"
+/// and "NoPeers" in maintainer.md. Must never create replicas/ dir.
 pub fn open_isolated_store(base: impl AsRef<Path>) -> Result<PersistentObjectStore, ArkError> {
     PersistentObjectStore::open(base.as_ref().join("primary"), Box::new(NoPeers))
 }
@@ -187,6 +204,10 @@ impl ReplicationBackend for LocalQuorum {
 }
 
 /// Safe-write content-addressed object store.
+///
+/// Maintainer: the only way to write durable objects or anchors. All writes
+/// must go through put / set_anchor. Direct filesystem writes bypass safety.
+/// See "Safe-write contract" and "put" in maintainer.md.
 pub struct PersistentObjectStore {
     root: PathBuf,
     backend: Box<dyn ReplicationBackend>,
@@ -194,6 +215,10 @@ pub struct PersistentObjectStore {
 
 impl PersistentObjectStore {
     /// Create objects/ and anchors/ under `root`; take the replication backend.
+    ///
+    /// Maintainer: creates the directory tree. For single-node FUSE pass a
+    /// NoPeers backend via open_isolated_store. Never pass a backend that
+    /// creates replicas/ when using OwnerOnly. See open() and "QuorumPolicy".
     pub fn open(
         root: impl Into<PathBuf>,
         backend: Box<dyn ReplicationBackend>,
@@ -211,6 +236,19 @@ impl PersistentObjectStore {
     /// primary is rewritten on the new-object path. Replicate or quorum
     /// failure discards new/rewrite staging and does not unpublish an intact
     /// existing name.
+    ///
+    /// Preconditions:
+    /// - quorum policy is satisfiable for the backend (OwnerOnly always is).
+    ///
+    /// Postconditions on success:
+    /// - object is durably staged (fsync), replicated to quorum, then published
+    ///   via atomic rename + directory fsync.
+    /// - returned ObjectId is the BLAKE3 of the bytes.
+    ///
+    /// Maintainer: safe-write contract: local fsync + quorum acks + publish.
+    /// Never write final name in place. Staging is sibling .tmp.
+    /// See "Safe-write contract", "put", "require_quorum".
+    /// Conflict-before-write is enforced by caller (TemporalCore).
     pub fn put(&self, data: &[u8], quorum: QuorumPolicy) -> Result<ObjectId, ArkError> {
         let id = ObjectId::from_bytes(data);
         let final_path = self.object_path(&id);
@@ -241,6 +279,10 @@ impl PersistentObjectStore {
     }
 
     /// Read and re-hash. Checksum mismatch is [`ArkError::Integrity`], not silent.
+    ///
+    /// Maintainer: always re-hashes on read (fail closed on mismatch).
+    /// Never trust on-disk data without verification. See "get" and
+    /// verify_integrity.
     pub fn get(&self, id: &ObjectId) -> Result<Vec<u8>, ArkError> {
         let path = self.object_path(id);
         let data = match fs::read(&path) {
@@ -262,6 +304,9 @@ impl PersistentObjectStore {
     }
 
     /// Store root (`objects/` and `anchors/` live under this).
+    ///
+    /// Maintainer: callers must not write under this root directly.
+    /// All durable writes must go through put/set_anchor.
     pub fn root(&self) -> &Path {
         &self.root
     }
@@ -269,6 +314,9 @@ impl PersistentObjectStore {
     /// Count of published `*.obj` files and their total size in bytes.
     ///
     /// Staging `*.tmp` is ignored. Used by FUSE `statfs` (not a checksum scan).
+    ///
+    /// Maintainer: only counts objects/ entries ending in .obj. Does not
+    /// walk anchors. See "usage" and statfs in fuse_facade.
     pub fn usage(&self) -> Result<(u64, u64), ArkError> {
         let dir = self.root.join("objects");
         let mut count = 0u64;
@@ -289,6 +337,10 @@ impl PersistentObjectStore {
     }
 
     /// Scan every `*.obj` under `objects/` and re-hash.
+    ///
+    /// Maintainer: used for integrity checks and tests. On mismatch returns
+    /// Integrity error (fail closed). See "verify_integrity" and get().
+    /// Does not touch anchors or staging files.
     pub fn verify_integrity(&self) -> Result<IntegrityReport, ArkError> {
         let dir = self.root.join("objects");
         let mut report = IntegrityReport {
@@ -330,6 +382,10 @@ impl PersistentObjectStore {
     }
 
     /// Atomically publish a named 32-byte root pointer (same safe-write as `put`).
+    ///
+    /// Maintainer: anchors are not content-addressed; they are mutable named
+    /// pointers (currently only "temporal_index"). Same fsync + quorum +
+    /// publish contract as put. See "Anchor" and "set_anchor".
     pub fn set_anchor(
         &self,
         name: &str,
@@ -350,6 +406,9 @@ impl PersistentObjectStore {
     }
 
     /// `Ok(None)` if the name has never been set. Wrong length is Integrity.
+    ///
+    /// Maintainer: anchors are 32 raw bytes. Wrong size is Integrity (fail closed).
+    /// Only "temporal_index" is used in Phase 0. See "Anchor".
     pub fn get_anchor(&self, name: &str) -> Result<Option<ObjectId>, ArkError> {
         validate_anchor_name(name)?;
         let path = self.anchor_path(name);
@@ -384,6 +443,11 @@ impl PersistentObjectStore {
 
     /// Local write counts as +1. On failure, discard `staging` (new names only;
     /// an existing primary is not unpublished).
+    ///
+    /// Maintainer: this enforces the quorum part of the safe-write contract.
+    /// total = remote + 1. For OwnerOnly with NoPeers this is 1. On failure
+    /// we discard staging (important for new objects). See "require_quorum",
+    /// "QuorumPolicy", "Safe-write contract".
     fn require_quorum(
         &self,
         remote_acks: u32,
@@ -404,6 +468,10 @@ impl PersistentObjectStore {
 }
 
 /// Best-effort: unpublished staging must not remain as a leftover name.
+///
+/// Maintainer: on any replication or quorum failure we must remove the .tmp
+/// so it does not become a stray durable file after crash. See "staging"
+/// and "Safe-write contract".
 fn discard_staging(staging: Option<&Path>) {
     if let Some(s) = staging {
         let _ = fs::remove_file(s);
@@ -411,6 +479,9 @@ fn discard_staging(staging: Option<&Path>) {
 }
 
 /// Anchors are `[A-Za-z0-9_]+` so they are safe as a single path component.
+///
+/// Maintainer: used to prevent path traversal or weird names in anchors/.
+/// Only temporal_index is used today. See "Anchor" and set_anchor/get_anchor.
 fn validate_anchor_name(name: &str) -> Result<(), ArkError> {
     if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
         return Err(ArkError::invalid_argument("invalid anchor name"));
@@ -419,6 +490,9 @@ fn validate_anchor_name(name: &str) -> Result<(), ArkError> {
 }
 
 /// Staging name: `abc.obj` → `abc.obj.tmp` (unique per final filename).
+///
+/// Maintainer: per-final-filename tmp prevents collisions when multiple
+/// objects are staged concurrently. Never use a shared tmp. See "staging".
 fn sibling_tmp(path: &Path) -> PathBuf {
     let mut name = path.file_name().unwrap_or_default().to_os_string();
     name.push(".tmp");
@@ -426,6 +500,10 @@ fn sibling_tmp(path: &Path) -> PathBuf {
 }
 
 /// `rename` staging → final, then `fsync` the parent directory (crash safety).
+///
+/// Maintainer: publish is the final step of safe-write. rename + fsync(dir)
+/// ensures the object is visible and durable after crash. Must only be
+/// called after quorum is satisfied. See "publish" and "safe-write".
 fn publish(staging: &Path, final_path: &Path) -> Result<(), ArkError> {
     let parent = final_path
         .parent()
@@ -435,6 +513,10 @@ fn publish(staging: &Path, final_path: &Path) -> Result<(), ArkError> {
 }
 
 /// Write `path` via a sibling tmp, `sync_all`, rename, fsync parent.
+///
+/// Maintainer: this is the local durable staging step of safe-write.
+/// Must fsync data file and then the parent dir after rename.
+/// See "safe-write", "fsync", "staging".
 fn write_fsync(path: &Path, data: &[u8]) -> Result<(), ArkError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(ArkError::from)?;
@@ -453,6 +535,10 @@ fn write_fsync(path: &Path, data: &[u8]) -> Result<(), ArkError> {
 }
 
 /// Directory fsync so a rename is durable. Open the dir as a file and `sync_all`.
+///
+/// Maintainer: required after rename of object or anchor so that the
+/// directory entry is durable. Failure to fsync dir can lose the publish
+/// across crash. See "fsync_dir" and safe-write.
 fn fsync_dir(path: impl AsRef<Path>) -> Result<(), ArkError> {
     let f = File::open(path.as_ref()).map_err(ArkError::from)?;
     f.sync_all().map_err(ArkError::from)?;
@@ -464,6 +550,9 @@ fn fsync_dir(path: impl AsRef<Path>) -> Result<(), ArkError> {
 /// `replica_names[0]` is the primary label (not a remote). Remotes are
 /// [`LocalQuorum::remotes_under`]. A single name therefore opens a store with
 /// an **empty** [`LocalQuorum`] — implicit isolation, still a cluster backend.
+///
+/// Maintainer: for cluster simulation/harness tests. For real single-node
+/// FUSE always use open_isolated_store + NoPeers. See "LocalQuorum".
 pub fn open_local_quorum_store(
     base: impl AsRef<Path>,
     replica_names: &[&str],

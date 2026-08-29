@@ -6,6 +6,9 @@
 //! `usize` (should not happen for sane FUSE offsets).
 
 /// Slice `data` for a FUSE read. Negative offsets behave as 0.
+///
+/// Maintainer: used by ArkSession::read. Negative offset is treated as 0
+/// (POSIX). Does not mutate. See "read".
 pub fn read_slice(data: &[u8], offset: i64, size: u32) -> &[u8] {
     let start = usize::try_from(offset.max(0)).unwrap_or(usize::MAX);
     if start >= data.len() {

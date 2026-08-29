@@ -75,15 +75,26 @@ pub struct ArkSession {
 
 impl ArkSession {
     /// Open `--data DIR` with no peer replication. `as_of_logical` is read-only.
+    ///
+    /// Maintainer: for normal FUSE mounts. ensure_root=true creates `/` as
+    /// inode 1. For --as-of the session is read-only. See mount_store_inner.
     pub fn mount_store(data_dir: &Path, as_of_logical: Option<u64>) -> Result<Self, ArkError> {
         Self::mount_store_inner(data_dir, as_of_logical, true)
     }
 
     /// Open an existing store for integrity checks without creating `/`.
+    ///
+    /// Maintainer: used by fsck/inspect paths. Does not ensure root so that
+    /// a corrupted or empty store can still be examined.
     pub fn inspect_store(data_dir: &Path) -> Result<Self, ArkError> {
         Self::mount_store_inner(data_dir, Some(0), false)
     }
 
+    /// Internal mount helper.
+    ///
+    /// Maintainer: single place that opens an isolated store and TemporalCore.
+    /// ensure_root controls whether we synthesize inode 1 for `/`.
+    /// as_of_logical=None means Live (writable), Some means read-only historical view.
     fn mount_store_inner(
         data_dir: &Path,
         as_of_logical: Option<u64>,
@@ -115,16 +126,25 @@ impl ArkSession {
     }
 
     /// True for `--as-of` mounts. Mutators return [`ArkError::ReadOnly`].
+    ///
+    /// Maintainer: mutating FUSE ops must call ro() early and return ReadOnly.
+    /// See "GitHub vs local" for CI vs live FUSE behavior.
     pub fn is_read_only(&self) -> bool {
         self.read_only
     }
 
     /// Current hybrid-logical tick. `--as-of N` is this number, not wall-clock.
+    ///
+    /// Maintainer: the logical component from TemporalCore. Used for
+    /// client-visible "now". See "Logical time".
     pub fn logical_now(&self) -> u64 {
         self.core.now().logical
     }
 
     /// Reject mutators on an `--as-of` (read-only) mount.
+    ///
+    /// Maintainer: every mutating entry point must call this first.
+    /// See "ReadOnly" error and is_read_only.
     fn ro(&self) -> Result<(), ArkError> {
         if self.read_only {
             Err(ArkError::ReadOnly)
@@ -134,6 +154,9 @@ impl ArkSession {
     }
 
     /// Unix bits plus stored ACLs for `mask` (POSIX `R_OK`/`W_OK`/`X_OK`/`F_OK`).
+    ///
+    /// Maintainer: permission model is in arkfs_core::access. FUSE layer
+    /// translates to EACCES via to_errno. See "Unix permission bits".
     fn require_mode(&self, h: &FileHandle, uid: u32, gid: u32, mask: u32) -> Result<(), ArkError> {
         if allows(&h.attrs, uid, gid, mask) {
             Ok(())
@@ -143,6 +166,9 @@ impl ArkSession {
     }
 
     /// Relatime: persist atime if it is older than mtime or older than a day.
+    ///
+    /// Maintainer: only on Live (not read-only mounts). Best-effort; errors
+    /// are swallowed. See "Relatime updates atime on read".
     fn maybe_touch_atime(&self, path: &str) {
         if self.read_only {
             return;
@@ -161,6 +187,10 @@ impl ArkSession {
     }
 
     /// Directory W+X, plus sticky-bit owner check when `child` is given.
+    ///
+    /// Maintainer: used for create/unlink/rmdir/rename. Sticky bit check
+    /// prevents non-owner from unlinking other people's entries in sticky dirs.
+    /// See "sticky_allows_unlink".
     fn require_dir_write(
         &self,
         parent: &FileHandle,
@@ -180,6 +210,9 @@ impl ArkSession {
     /// Lookup `name` in FUSE parent inode using the session's live/as-of view.
     ///
     /// Parent search (`X_OK`) is required. `uid`/`gid` 0 is root (tests).
+    ///
+    /// Maintainer: permission check is done here (X_OK on parent). Path
+    /// construction uses PathKey::join. Core lookup then hides tombstones.
     pub fn lookup(
         &self,
         parent: u64,
@@ -235,6 +268,10 @@ impl ArkSession {
     /// Partial setattr. Size hits the shared inode buffer; other fields use attr_map.
     ///
     /// Truncate needs write. chmod/times need owner or root. chown needs root.
+    ///
+    /// Maintainer: must use merge_from_fuse (attr_map) — never wholesale replace
+    /// FileAttributes. Size path goes through the inode buffer or replace_content.
+    /// See "Partial setattr" trap.
     pub fn setattr(
         &self,
         ino: u64,
@@ -294,6 +331,10 @@ impl ArkSession {
     }
 
     /// Create a live directory. `mode` is permission bits only (type comes from mkdir).
+    ///
+    /// Maintainer: calls into TemporalCore::mkdir which allocates file_id if 0
+    /// (Inode 0 trap). Inherits setgid etc via inherit_from_parent. Permission
+    /// via require_dir_write (W+X + sticky). See "mkdir" and "setgid directories".
     pub fn mkdir(
         &self,
         parent: u64,
@@ -310,6 +351,10 @@ impl ArkSession {
     }
 
     /// Create an empty regular file and open it. Recreate after a tombstone is allowed.
+    ///
+    /// Maintainer: open-file cache is per-inode. The returned fh shares the
+    /// InodeBuf with any other open handle on the same file_id. See
+    /// "Open-file cache is per-inode" trap and release/flush paths.
     pub fn create_file(
         &self,
         parent: u64,
@@ -337,6 +382,10 @@ impl ArkSession {
     }
 
     /// Tombstone a non-directory. Flushes the inode first so dirty bytes are history.
+    ///
+    /// Maintainer: must flush_ino before tombstone so dirty writes become a
+    /// version. Then syncs inode paths. See "flush before unlink" and
+    /// "release must persist".
     pub fn unlink(&self, parent: u64, name: &str, uid: u32, gid: u32) -> Result<(), ArkError> {
         self.ro()?;
         let dir = self.core.lookup_ino(parent, View::Live)?;
@@ -350,6 +399,9 @@ impl ArkSession {
     }
 
     /// Tombstone an empty directory. Root cannot be removed.
+    ///
+    /// Maintainer: directory emptiness is checked at tombstone time.
+    /// rmdir is just a tombstone (never-delete). See "rmdir".
     pub fn rmdir(&self, parent: u64, name: &str, uid: u32, gid: u32) -> Result<(), ArkError> {
         self.ro()?;
         let dir = self.core.lookup_ino(parent, View::Live)?;
@@ -362,6 +414,11 @@ impl ArkSession {
     }
 
     /// Move a name. Directories take every descendant. `flags` are `renameat2` bits.
+    ///
+    /// Maintainer: delegates to core rename which uses rebase + tombstone
+    /// fan-out in one persist. Directory rename retargets all live descendants
+    /// (Directory rename trap). Must call sync_inode_paths after.
+    /// Also flushes the source inode.
     #[allow(clippy::too_many_arguments)]
     pub fn rename(
         &self,
@@ -393,6 +450,10 @@ impl ArkSession {
     }
 
     /// Extra directory entry for a live non-directory (hard link).
+    ///
+    /// Maintainer: must flush the source inode first (dirty data becomes
+    /// history). Hard links share file_id; writes fan out. See "link" and
+    /// "Open-file cache is per-inode".
     pub fn link(
         &self,
         ino: u64,
@@ -411,6 +472,9 @@ impl ArkSession {
     }
 
     /// Create a symlink. Target is stored in attrs and as content bytes.
+    ///
+    /// Maintainer: target bytes are both in symlink_target attr and as the
+    /// content object (for readlink fallback). See TemporalCore::symlink.
     pub fn symlink(
         &self,
         parent: u64,
@@ -428,6 +492,9 @@ impl ArkSession {
     }
 
     /// Read a symlink target. Prefers `attrs.symlink_target`, else content bytes.
+    ///
+    /// Maintainer: both locations are written by TemporalCore::symlink so that
+    /// readlink works even if attrs projection changes. See "symlink".
     pub fn readlink(&self, ino: u64) -> Result<Vec<u8>, ArkError> {
         let h = self.core.lookup_ino(ino, self.view)?;
         match h.attrs.symlink_target {
@@ -437,6 +504,9 @@ impl ArkSession {
     }
 
     /// Immediate children. FUSE adds `.` / `..` itself. Needs directory R+X.
+    ///
+    /// Maintainer: delegates to TemporalCore::readdir which is a path-prefix
+    /// scan (not inode children). See "readdir is a prefix scan".
     pub fn readdir(&self, ino: u64, uid: u32, gid: u32) -> Result<Vec<DirEntry>, ArkError> {
         let h = self.core.lookup_ino(ino, self.view)?;
         if h.attrs.file_type != FileType::Directory {
@@ -449,6 +519,9 @@ impl ArkSession {
     }
 
     /// Open a directory. Must be a directory; search (`X_OK`) required.
+    ///
+    /// Maintainer: directories are stateless (fh is a dummy 0). Permission
+    /// is X_OK only. See "opendir".
     pub fn opendir(&self, ino: u64, uid: u32, gid: u32) -> Result<u64, ArkError> {
         let h = self.core.lookup_ino(ino, self.view)?;
         if h.attrs.file_type != FileType::Directory {
@@ -462,6 +535,9 @@ impl ArkSession {
     ///
     /// Fifo / char / block / socket return [`ArkError::NoSuchDevice`] (`ENXIO`):
     /// this node does not host a pipe or device driver.
+    ///
+    /// Maintainer: returns a per-inode fh. Writable opens go through ro().
+    /// See "open-file cache is per-inode" and release/flush.
     pub fn open(&self, ino: u64, flags: i32, uid: u32, gid: u32) -> Result<u64, ArkError> {
         let h = self.core.lookup_ino(ino, self.view)?;
         if h.attrs.file_type == FileType::Directory {
@@ -484,17 +560,26 @@ impl ArkSession {
     }
 
     /// Unix `access(2)` against a live inode (`mask` is `R_OK`/`W_OK`/`X_OK`/`F_OK`).
+    ///
+    /// Maintainer: delegates to require_mode which uses arkfs_core::allows.
+    /// F_OK is always true once the inode was found.
     pub fn access(&self, ino: u64, mask: i32, uid: u32, gid: u32) -> Result<(), ArkError> {
         let h = self.core.lookup_ino(ino, self.view)?;
         self.require_mode(&h, uid, gid, mask as u32)
     }
 
     /// Re-hash every published CAS object. Used by `arkfs fsck`.
+    ///
+    /// Maintainer: delegates to PersistentObjectStore::verify_integrity.
+    /// Failures are Integrity errors (fail closed). See "verify_integrity".
     pub fn verify_integrity(&self) -> Result<persistent_object_store::IntegrityReport, ArkError> {
         self.core.store().verify_integrity()
     }
 
     /// Live path count + on-disk object bytes + backing-fs free space.
+    ///
+    /// Maintainer: files = live_path_count (non-tombstones). Blocks from
+    /// backing fs or synthetic. See "statfs" and usage().
     pub fn statfs(&self) -> Result<FsStat, ArkError> {
         let (_objs, bytes) = self.core.store().usage()?;
         let files = self.core.live_path_count();
@@ -514,6 +599,10 @@ impl ArkSession {
     }
 
     /// Read from the shared inode buffer. Negative offsets behave as 0.
+    ///
+    /// Maintainer: content comes from the per-inode InodeBuf (dirty or loaded
+    /// from CAS). atime update is best-effort (relatime). See "read" and
+    /// "maybe_touch_atime".
     pub fn read(&self, fh: u64, offset: i64, size: u32) -> Result<Vec<u8>, ArkError> {
         let ino = self.fh_ino(fh)?;
         let mut inodes = self.inodes.lock().unwrap();
@@ -529,6 +618,10 @@ impl ArkSession {
     }
 
     /// Write into the shared inode buffer. Regular files only; persist on fsync/release.
+    ///
+    /// Maintainer: writes are buffered per-inode (InodeBuf). All fhs on the
+    /// same inode share the buffer. Persistence happens on fsync/release.
+    /// See "Open-file cache is per-inode" trap and flush_ino/release.
     pub fn write(&self, fh: u64, offset: i64, data: &[u8]) -> Result<u32, ArkError> {
         self.ro()?;
         let (ino, writable) = {
@@ -564,12 +657,21 @@ impl ArkSession {
     }
 
     /// Persist dirty bytes for this fh's inode. Does not drop the fh or locks.
+    ///
+    /// Maintainer: open-file cache is per-inode. fsync must persist the
+    /// whole buffer before returning. On error the buffer must remain dirty.
+    /// See "fsync / flush / release must persist" and "Open-file cache is per-inode".
     pub fn fsync(&self, fh: u64) -> Result<(), ArkError> {
         let ino = self.fh_ino(fh)?;
         self.flush_ino(ino)
     }
 
     /// Persist dirty bytes then drop the fh. On persist failure the buffer stays.
+    ///
+    /// Maintainer: release must attempt to persist. If persist fails, keep the
+    /// buffer (refs, dirty) and return the error so the application can retry.
+    /// This is the critical "release must persist" durability rule.
+    /// See "release must persist before dropping the fh" trap.
     pub fn release(&self, fh: u64) -> Result<(), ArkError> {
         let ino = self.fh_ino(fh)?;
         let flush_res = self.flush_ino(ino);
@@ -585,6 +687,9 @@ impl ArkSession {
     }
 
     /// Retry persist for every dirty inode (unmount / destroy).
+    ///
+    /// Maintainer: called from FuseFs::destroy. Best-effort; records last error.
+    /// See "destroy" and "flush_dirty".
     pub fn flush_dirty(&self) -> Result<(), ArkError> {
         let inos: Vec<u64> = self
             .inodes
@@ -604,6 +709,10 @@ impl ArkSession {
     }
 
     /// Set one xattr. Fans out to every hard-link name of the inode.
+    ///
+    /// Maintainer: uses commit_attrs (which fans out via hard links). Respects
+    /// XATTR_CREATE / REPLACE. Permission is W on the inode.
+    /// See "xattr" and "XATTR_CREATE / XATTR_REPLACE".
     pub fn setxattr(
         &self,
         ino: u64,
@@ -669,6 +778,10 @@ impl ArkSession {
     }
 
     /// Create a node of any POSIX type. `mode` includes `S_IFMT`; `rdev` is for devices.
+    ///
+    /// Maintainer: delegates to core mknod which goes through commit_branch
+    /// (Inode 0 allocation + conflict-before-write + safe publish).
+    /// Directories are redirected to mkdir. See "mknod".
     #[allow(clippy::too_many_arguments)]
     pub fn mknod(
         &self,
@@ -705,6 +818,10 @@ impl ArkSession {
     ///
     /// Source bytes are cloned first so same-file overlapping copies are
     /// memmove-safe. `flags` must be 0.
+    ///
+    /// Maintainer: implemented via read into a temp buffer then write.
+    /// Both source and dest must be open regular files. No cross-device.
+    /// See "copy_file_range".
     #[allow(clippy::too_many_arguments)]
     pub fn copy_file_range(
         &self,
@@ -781,6 +898,9 @@ impl ArkSession {
     }
 
     /// `flush` is FUSE close: persist dirty bytes and drop POSIX locks for `owner`.
+    ///
+    /// Maintainer: called on every close(2) of an fd. Must persist. Locks for
+    /// the lock_owner are dropped here. See "flush" and "POSIX locks".
     pub fn flush(&self, fh: u64, lock_owner: u64) -> Result<(), ArkError> {
         let ino = self.fh_ino(fh)?;
         self.locks.unlock_owner(ino, lock_owner);
@@ -788,6 +908,9 @@ impl ArkSession {
     }
 
     /// Local files are always readable/writable. `events` is the requested mask.
+    ///
+    /// Maintainer: poll always reports POLLIN|POLLOUT etc. for regular files.
+    /// No real async I/O. See "poll" and "always-ready poll".
     pub fn poll(&self, ino: u64, fh: Option<u64>, events: u32) -> Result<u32, ArkError> {
         if let Some(fh) = fh {
             if fh != 0 {
@@ -828,6 +951,10 @@ impl ArkSession {
     }
 
     /// Grow a regular file. Only mode 0 and `FALLOC_FL_KEEP_SIZE` are accepted.
+    ///
+    /// Maintainer: with KEEP_SIZE we are a no-op (we do not allocate). Without
+    /// it we extend via setattr (which may dirty the inode buffer).
+    /// See "fallocate".
     pub fn fallocate(
         &self,
         ino: u64,
@@ -897,6 +1024,9 @@ impl ArkSession {
     }
 
     /// Kernel fh → inode. Unknown fh is EINVAL.
+    ///
+    /// Maintainer: fhs are just keys into the handles table; the real state is
+    /// the per-inode InodeBuf. See "fh" vs inode.
     fn fh_ino(&self, fh: u64) -> Result<u64, ArkError> {
         self.handles
             .lock()
@@ -907,6 +1037,9 @@ impl ArkSession {
     }
 
     /// fcntl locks apply to files, not directories.
+    ///
+    /// Maintainer: POSIX record locks are only meaningful on regular files.
+    /// Directories return EINVAL. See posix_lock and "POSIX locks".
     fn require_lockable(&self, ino: u64) -> Result<(), ArkError> {
         let h = self.core.lookup_ino(ino, self.view)?;
         if h.attrs.file_type == FileType::Directory {
@@ -916,6 +1049,9 @@ impl ArkSession {
     }
 
     /// Dirty open size wins over the last persisted `logical_size`.
+    ///
+    /// Maintainer: used by getattr when an open fh is supplied. The per-inode
+    /// buffer is authoritative for size while the file is open. See "getattr".
     fn overlay_cached_size(&self, ino: u64, attr: &mut FileAttr) {
         if let Some(buf) = self.inodes.lock().unwrap().get(&ino) {
             if buf.loaded {
@@ -926,6 +1062,9 @@ impl ArkSession {
     }
 
     /// Stat from the open-file cache when the live name is gone.
+    ///
+    /// Maintainer: after unlink of the last name, fstat on an open fd must
+    /// still work from the cached InodeBuf. nlink is forced to 0.
     fn getattr_cached(&self, ino: u64) -> Option<FileAttr> {
         let inodes = self.inodes.lock().unwrap();
         let buf = inodes.get(&ino)?;
@@ -941,6 +1080,10 @@ impl ArkSession {
     }
 
     /// Allocate an fh and attach it to the per-inode buffer. `O_TRUNC` is inode-wide.
+    ///
+    /// Maintainer: every open file handle shares the InodeBuf for its inode.
+    /// O_TRUNC is applied at open time via replace_content. refs count
+    /// controls when the buffer can be dropped. See "open-file cache is per-inode".
     fn open_handle(&self, h: &FileHandle, flags: i32, writable: bool) -> Result<u64, ArkError> {
         let ino = h.attrs.file_id;
         let path = h.path.clone();
@@ -986,6 +1129,10 @@ impl ArkSession {
     }
 
     /// Load CAS bytes into `buf`. If the cached path is stale, retry by inode.
+    ///
+    /// Maintainer: called on first read/write after open or after rename/unlink
+    /// retargeting. If the live name is gone we fall back to lookup by inode.
+    /// See "ensure_loaded" and "getattr_cached".
     fn ensure_loaded(&self, ino: u64, buf: &mut InodeBuf) -> Result<(), ArkError> {
         if buf.loaded {
             return Ok(());
@@ -1002,6 +1149,10 @@ impl ArkSession {
     }
 
     /// Resize the shared inode buffer, or persist a truncate if the file is not open.
+    ///
+    /// Maintainer: if the inode has an open buffer we mutate it (dirty=true).
+    /// Otherwise we go through replace_content (which does commit_branch).
+    /// See "truncate" and open-file cache rules.
     fn truncate_ino(&self, ino: u64, size: u64) -> Result<(), ArkError> {
         {
             let mut inodes = self.inodes.lock().unwrap();
@@ -1022,6 +1173,10 @@ impl ArkSession {
     }
 
     /// Persist dirty regular-file bytes. No-op for unlinked inodes and special files.
+    ///
+    /// Maintainer: the heart of durability on close/fsync. Must succeed or
+    /// keep the buffer dirty. On name disappearance after unlink, it may
+    /// fall back to lookup_ino. See "release must persist" and "flush_ino".
     fn flush_ino(&self, ino: u64) -> Result<(), ArkError> {
         let (path, data) = {
             let mut inodes = self.inodes.lock().unwrap();
@@ -1057,6 +1212,10 @@ impl ArkSession {
     }
 
     /// Flush every open inode whose cached path is under `prefix` (directory rename).
+    ///
+    /// Maintainer: called before rename when the source subtree may have dirty
+    /// buffers. Ensures data is a version before the tree move.
+    /// See "flush_under" and directory rename trap.
     fn flush_under(&self, prefix: &PathKey) -> Result<(), ArkError> {
         let inos: Vec<u64> = self
             .inodes

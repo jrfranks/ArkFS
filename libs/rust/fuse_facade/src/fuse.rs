@@ -9,6 +9,10 @@
 //! in userspace (`FUSE_POSIX_LOCKS` / `FUSE_DO_READDIRPLUS` advertised in
 //! `init`). SETLKW replies from a helper thread so the session loop can still
 //! process the matching unlock.
+//!
+//! Maintainer: this layer must stay a thin adapter. All POSIX and temporal
+//! semantics live in ArkSession / TemporalCore. See "Do not put filesystem
+//! logic in FuseFs" in maintainer.md.
 
 use crate::session::{errno, fuse_kind, handle_to_attr, time_or_now_to_timespec, ArkSession, TTL};
 use crate::xattr::SizedBytes;
@@ -89,6 +93,9 @@ impl Filesystem for FuseFs {
     }
 
     /// Stat. Passes fh so dirty size is visible.
+    ///
+    /// Maintainer: dirty size from the per-inode buffer must be visible to
+    /// fstat on open fhs even after the name is unlinked. See getattr + overlay_cached_size.
     fn getattr(&mut self, _req: &Request<'_>, ino: u64, fh: Option<u64>, reply: ReplyAttr) {
         match self.0.getattr(ino, fh) {
             Ok(a) => reply.attr(&TTL, &a),
@@ -97,6 +104,10 @@ impl Filesystem for FuseFs {
     }
 
     /// Partial POSIX setattr (mode/uid/gid/size/times). Unset fields stay put.
+    ///
+    /// Maintainer: delegates to ArkSession::setattr which must use
+    /// merge_from_fuse (Partial setattr trap). Size path may truncate the
+    /// shared inode buffer.
     fn setattr(
         &mut self,
         req: &Request<'_>,

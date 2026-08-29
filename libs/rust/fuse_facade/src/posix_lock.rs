@@ -20,6 +20,10 @@ struct FileLock {
 }
 
 /// In-process POSIX record-lock table, keyed by inode + lock owner.
+///
+/// Maintainer: implemented in userspace. Advertised via FUSE_POSIX_LOCKS /
+/// FLOCK_LOCKS in init. SETLKW must be replied from a helper thread.
+/// See "POSIX locks" in maintainer.md and fuse.rs.
 pub struct LockTable {
     locks: Mutex<Vec<FileLock>>,
     cv: Condvar,
@@ -37,6 +41,8 @@ impl Default for LockTable {
 
 impl LockTable {
     /// F_GETLK. Returns the blocker, or the request range with `F_UNLCK` if free.
+    ///
+    /// Maintainer: does not block. Used by FUSE getlk. See posix_lock module.
     #[allow(clippy::too_many_arguments)]
     pub fn getlk(
         &self,
