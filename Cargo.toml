@@ -34,5 +34,9 @@ tempfile = "3.14"
 
 # Kani proofs live under `#[cfg(kani)]`. Teach rustc that `kani` is an expected cfg
 # so `cargo test` does not warn about unexpected_cfgs.
+#
+# Note: the inner check-cfg form produces "unused manifest key" warnings on
+# recent stable. We register the cfg via RUSTFLAGS for kani runs (local only).
+# GitHub CI never runs Kani/Miri.
 [workspace.lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+unexpected_cfgs = "warn"
