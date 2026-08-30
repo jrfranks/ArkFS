@@ -1,5 +1,7 @@
 # ArkFS
 
+[![CI](https://github.com/jrfranks/ArkFS/actions/workflows/ci.yml/badge.svg)](https://github.com/jrfranks/ArkFS/actions/workflows/ci.yml)
+
 Sovereign continuous temporal distributed file system. Data follows the owner (Earth → Moon → Mars). Never-delete with arbitrary timestamp access. Private clusters. Custom modular code (Elixir orchestration + Rust performance paths).
 
 **New maintainers:** start at [docs/maintainer.md](docs/maintainer.md) (glossary, on-disk layout, request path, tests, traps). Product spec: [SPEC.md](SPEC.md). IPC test oracle: [docs/conformance/ipc.md](docs/conformance/ipc.md).
@@ -17,7 +19,7 @@ apps/*          Runnable apps that depend on libraries
 ## Quick start
 
 ```bash
-git clone <url> ArkFS
+git clone https://github.com/jrfranks/ArkFS.git
 cd ArkFS
 make setup     # rustfmt, clippy, Kani, Miri, llvm-cov; enables git hooks
 make test
