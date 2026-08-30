@@ -2,18 +2,20 @@
 
 [![CI](https://github.com/jrfranks/ArkFS/actions/workflows/ci.yml/badge.svg)](https://github.com/jrfranks/ArkFS/actions/workflows/ci.yml)
 
-Sovereign continuous temporal distributed file system. Data follows the owner (Earth → Moon → Mars). Never-delete with arbitrary timestamp access. Private clusters. Custom modular code (Elixir orchestration + Rust performance paths).
+ArkFS is a never-delete filesystem. Pick a timestamp, and you get the tree as it was. Nothing is squashed, and nothing is gone.
 
-**New maintainers:** start at [docs/maintainer.md](docs/maintainer.md) (glossary, on-disk layout, request path, tests, traps). Product spec: [SPEC.md](SPEC.md). IPC test oracle: [docs/conformance/ipc.md](docs/conformance/ipc.md).
+The live path today is a single Linux node you can mount with FUSE. Rust owns the object store and the temporal index. Elixir runs the simulation harness (clock jumps, delay, bit flips, node loss). GitHub Actions runs the fast test bar. The slower proofs (Kani, Miri) run on `git push` if you have those tools installed.
 
-## Organization
+This is Phase 0: one node, a real mount, and conformance tests. The longer product map is in [SPEC.md](SPEC.md). If you are going to change code, start with [docs/maintainer.md](docs/maintainer.md) (layout, request path, tests, traps). IPC oracle: [docs/conformance/ipc.md](docs/conformance/ipc.md).
 
-**Make** is the monorepo organizer. Each deliverable is an **independent library** or an **app that includes libraries**. There is no Mix umbrella.
+## Layout
+
+Make is the organizer. Each crate or Mix project stands on its own. There is no Mix umbrella.
 
 ```
-libs/rust/*     Rust libraries (Cargo workspace convenience under Make)
+libs/rust/*     Rust libraries
 libs/elixir/*   Elixir libraries (each has its own mix.exs)
-apps/*          Runnable apps that depend on libraries
+apps/*          runnable apps that depend on those libraries
 ```
 
 ## Quick start
@@ -25,17 +27,13 @@ make setup     # rustfmt, clippy, Kani, Miri, llvm-cov; enables git hooks
 make test
 ```
 
-`make setup` is idempotent. `make test` / `make build` also set `core.hooksPath` so the push gate is armed without a separate setup step. After hooks are on, `git checkout` / `git pull` re-run the installer. `make test` does not install Kani. GitHub sets `CI` and skips the installer (`make ci` only). Commits are not gated; `git push` runs `make prepush`. See [`.github/CONTRIBUTING.md`](.github/CONTRIBUTING.md).
+`make setup` is safe to re-run. `make test` and `make build` also arm the git hooks, so you do not need a separate setup step. After that, `git checkout` / `git pull` re-run the installer. `make test` does not install Kani. GitHub sets `CI` and only runs `make ci`. Commits are not gated. `git push` runs `make prepush`. Details: [`.github/CONTRIBUTING.md`](.github/CONTRIBUTING.md).
 
-## FUSE client
+## Mount it (Linux)
 
-A live `arkfs` mount needs a FUSE **client** on the host (kernel module or equivalent plus the unmount helper). Phase 0 `arkfs mount` is **Linux-only** (`fuse3`, `/dev/fuse`, `fusermount3`). macOS and Windows steps install the platform FUSE stack so you can develop against it or run a FUSE filesystem when a non-Linux facade exists.
+Phase 0 `arkfs mount` is Linux-only (`fuse3`, `/dev/fuse`, `fusermount3`). You need the FUSE client plus headers used to build `fuser`.
 
-Mount docs: [docs/fuse.md](docs/fuse.md).
-
-### Linux
-
-Install FUSE 3 and the development headers used to build `fuser`:
+More mount notes: [docs/fuse.md](docs/fuse.md).
 
 ```bash
 # Debian / Ubuntu
@@ -52,21 +50,21 @@ sudo pacman -S fuse3
 sudo zypper install -y fuse3 fuse3-devel
 ```
 
-Confirm the device and helper exist:
+Check that the device and helper exist:
 
 ```bash
 ls -l /dev/fuse
 fusermount3 -V
 ```
 
-`/dev/fuse` is often world-read/write. If open fails with `EACCES`, add your user to the `fuse` group and log in again:
+`/dev/fuse` is often world-read/write. If open fails with `EACCES`, add yourself to the `fuse` group and log in again:
 
 ```bash
 sudo groupadd -f fuse
 sudo usermod -aG fuse "$USER"
 ```
 
-You do **not** need `user_allow_other` in `/etc/fuse.conf` for `arkfs` (the mount does not pass `allow_other`).
+You do not need `user_allow_other` in `/etc/fuse.conf`. ArkFS does not pass `allow_other`.
 
 ```bash
 make test                    # cargo test (debug) + mix test
@@ -82,66 +80,45 @@ ls /mnt/ark
 arkfs umount /mnt/ark
 ```
 
-Dev loop without installing: `cargo run -p arkfs -- mount --data /var/lib/arkfs /mnt/ark`.
+Without installing: `cargo run -p arkfs -- mount --data /var/lib/arkfs /mnt/ark`.
 
 ### macOS
 
-Install **macFUSE** (kernel extension; not the same as Linux `fuse3`):
+Install [macFUSE](https://macfuse.github.io/) (kernel extension; not Linux `fuse3`):
 
 ```bash
-# Homebrew
 brew install --cask macfuse
 ```
 
-Or download the signed installer from [macfuse.github.io](https://macfuse.github.io/).
-
-After install:
-
-1. Open **System Settings → Privacy & Security** and allow the macFUSE system extension (you may need to restart).
-2. Confirm the filesystem bundle exists: `ls /Library/Filesystems/macfuse.fs`.
-
-Phase 0 `arkfs` does not mount on macOS. The cask is for local FUSE tooling and a future macOS facade.
+Then allow the system extension in **System Settings → Privacy & Security** (a restart is common), and confirm `ls /Library/Filesystems/macfuse.fs`. Phase 0 does not mount on macOS. The cask is for local FUSE tooling and a later macOS facade.
 
 ### Windows
 
-Install **WinFsp** (Windows File System Proxy). It provides the kernel driver and a FUSE-compatible user-mode API:
+Install [WinFsp](https://winfsp.dev/) (kernel driver plus a FUSE-compatible user-mode API):
 
 ```powershell
-# winget
 winget install --id WinFsp.WinFsp
-
-# Chocolatey
-choco install winfsp
+# or: choco install winfsp
 ```
 
-Or the MSI from [winfsp.dev](https://winfsp.dev/) / [github.com/winfsp/winfsp/releases](https://github.com/winfsp/winfsp/releases).
+Reboot or log on again, then `Get-Service WinFsp.Launcher`. Phase 0 does not mount on Windows. Dokany is a different stack and is not used here.
 
-A reboot (or at least a new logon) is typical after the driver is installed. Confirm with:
-
-```powershell
-Get-Service WinFsp.Launcher
-```
-
-Phase 0 `arkfs` does not mount on Windows. WinFsp is the usual host stack for a later Windows facade. Dokany is a separate stack and is not used by this tree.
-
-## Phase 0 libraries
+## What is in the tree
 
 | Library | Role |
 |---------|------|
-| `arkfs_core` | Shared types + **FileAttributes** superset (FUSE/NFS/SMB3/WebDAV/macOS) |
-| `simulation_harness` | Interplanetary sim: clock, delay, chaos |
+| `arkfs_core` | Shared types and **FileAttributes** (FUSE / NFS / SMB3 / WebDAV / macOS) |
+| `simulation_harness` | Clock, delay, chaos |
 | `persistent_object_store` | Safe-write object store (fsync + quorum) |
 | `temporal_core` | Cactus-stack temporal engine |
 
 | App | Role |
 |-----|------|
-| `sim_runner` | Runs Elixir harness scenarios (clock / delay / chaos). Store and temporal tests live in `cargo test`. |
+| `sim_runner` | Elixir harness scenarios. Store and temporal tests live in `cargo test`. |
 | `arkfs` | Single-node FUSE mount (`arkfs mount --data DIR MOUNTPOINT`). See [docs/fuse.md](docs/fuse.md). |
 
-## Attribute model
-
-Canonical metadata is a superset of protocol needs. Facades map via `arkfs_core::attr_map`. Details: [docs/attributes.md](docs/attributes.md).
+Canonical metadata is a superset of what each protocol needs. Facades map through `arkfs_core::attr_map`. Details: [docs/attributes.md](docs/attributes.md).
 
 ## License
 
-[MIT](LICENSE) — Copyright (c) 2026 jrfranks.
+[MIT](LICENSE). Copyright (c) 2026 jrfranks.
