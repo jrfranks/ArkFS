@@ -3,7 +3,7 @@ defmodule SimRunner do
   Thin app that **includes** the `SimulationHarness` library and runs named scenarios.
 
   Catalog entries only assert harness behavior this process can actually run
-  (clock, delay, chaos log, history oracle). Store and temporal guarantees are
+  (clock, delay, chaos log, history oracle). Store and temporal behavior are
   covered by `cargo test` on the Rust libraries.
 
   Add a scenario: put a name in `@scenarios`, a `scenario_def/1` clause, and an

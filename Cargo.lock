@@ -212,6 +212,7 @@ version = "0.1.0"
 dependencies = [
  "arkfs_core",
  "arkfs_test_review",
+ "simulation_harness",
  "tempfile",
 ]
 

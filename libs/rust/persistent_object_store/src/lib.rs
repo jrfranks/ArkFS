@@ -600,7 +600,7 @@ mod tests {
         assert_eq!(a, b);
     }
 
-    /// Corrupting an object file makes get and integrity_scan fail.
+    /// A planned harness flip, applied to the published object, fails get and the scan.
     #[test]
     fn bit_flip_detected_on_get_and_scan() {
         let _g = arkfs_test_review::guard();
@@ -608,9 +608,14 @@ mod tests {
         let store = open_local_quorum_store(dir.path(), &["n0", "n1"]).unwrap();
         let data = b"integrity-me";
         let id = store.put(data, QuorumPolicy::n(1)).unwrap();
+        let mut chaos = simulation_harness::ChaosInjector::new();
+        chaos.inject_bit_flip("n0", id.to_hex());
+        let planned = chaos.take_bit_flips();
+        assert_eq!(planned.len(), 1);
+        assert_eq!(planned[0].0, "n0");
         let path = store.object_path(&id);
         let mut buf = fs::read(&path).unwrap();
-        buf[0] ^= 1;
+        simulation_harness::flip_bit_in_buffer(&mut buf, 0);
         fs::write(&path, &buf).unwrap();
         assert!(matches!(store.get(&id), Err(ArkError::Integrity { .. })));
         let report = store.verify_integrity().unwrap();

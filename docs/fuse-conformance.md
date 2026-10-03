@@ -58,11 +58,11 @@ The binary is exec'd for usability (exit codes, stderr contains `usage`).
 |------|------|-----|
 | rustc exhaustiveness | `ArkError` → errno, `FileType` → FUSE kind | compile-time `match` |
 | rustfmt | format | `make ci` (GitHub) |
-| cargo / mix test | package + FUSE conformance + CLI | `make ci` (GitHub) |
+| cargo / mix test | package tests, in-process FUSE op reachability, CLI | `make ci` (GitHub) |
 | clippy `-D warnings` | lints | `make prepush` (local only) |
-| [Kani](https://github.com/model-checking/kani) | `read_slice`/`apply_write`, xattr sizing, PathKey, errno table | `make prepush` |
-| Miri | UB on PathKey parse | `make prepush` |
-| cargo-llvm-cov | session/errno/io ≥ 90% lines (not `fuse.rs`) | `make prepush` |
+| [Kani](https://github.com/model-checking/kani) | `write_then_read_returns_payload`, `negative_offset_reads_from_zero`, `range_iff_too_small` | `make prepush` |
+| Miri | UB on PathKey parse (`path_parse`) | `make prepush` |
+| cargo-llvm-cov | line coverage on `fuse_facade` (≥ 80%, not a substitute for `fuse.rs` review) | `make prepush` |
 
 GitHub never runs Kani, Miri, or llvm-cov. Local `make prepush` **fails** if those tools are missing (not skipped).
 

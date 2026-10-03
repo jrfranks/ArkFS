@@ -1,12 +1,13 @@
 //! Simulation harness primitives for ArkFS library tests.
 //!
-//! Deterministic clock, Earth/Moon/Mars delay model, bit-flip and node-loss chaos.
+//! Deterministic clock, Earth/Moon/Mars delay presets, and a chaos log.
 //!
 //! This crate does **not** implement the object store or temporal index. It
-//! records *intent* (advance time, inject a flip, mark a node lost) so tests
-//! can apply those effects to a real `persistent_object_store` later.
-//! The Elixir package of the same name is the scenario DSL / oracle; keep
-//! the two models aligned (Earth/Moon/Mars, clock_rate, mars_delay_ms).
+//! records intent (advance time, name a flip, mark a node lost). The store
+//! integrity test drains that log and applies [`flip_bit_in_buffer`] to the
+//! published object. The Elixir package of the same name is the scenario
+//! catalog; it also only records intent. Keep the two models aligned
+//! (Earth/Moon/Mars, clock_rate, mars_delay_ms).
 
 use arkfs_core::Timestamp;
 use serde::{Deserialize, Serialize};
@@ -176,7 +177,8 @@ impl ChaosInjector {
         &self.bit_flips
     }
 
-    /// Drain planned flips so a store test can apply them.
+    /// Drain planned flips. The store integrity test applies each one with
+    /// [`flip_bit_in_buffer`].
     pub fn take_bit_flips(&mut self) -> Vec<(String, String)> {
         std::mem::take(&mut self.bit_flips)
     }

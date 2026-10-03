@@ -2,11 +2,13 @@
 
 [![CI](https://github.com/jrfranks/ArkFS/actions/workflows/ci.yml/badge.svg)](https://github.com/jrfranks/ArkFS/actions/workflows/ci.yml)
 
-ArkFS is a never-delete filesystem. Pick a timestamp, and you get the tree as it was. Nothing is squashed, and nothing is gone.
+ArkFS keeps every committed version of a path. `unlink` and `rmdir` append a tombstone, so the live name disappears and `arkfs mount --data DIR --as-of N` can still read the tree at logical commit N. That mount is read-only. Objects stay in the content-addressed store; this tree has no garbage collector.
 
-The live path today is a single Linux node you can mount with FUSE. Rust owns the object store and the temporal index. Elixir runs the simulation harness (clock jumps, delay, bit flips, node loss). GitHub Actions runs the fast test bar. The slower proofs (Kani, Miri) run on `git push` if you have those tools installed.
+The mount is one Linux node (`fuse3`, `/dev/fuse`). Rust owns the object store and the temporal index. `arkfs mount` opens `open_isolated_store`: local `fsync`, directory `fsync` after `rename`, `QuorumPolicy::OwnerOnly`, and no `replicas/` directory. Elixir runs the scenario catalog (logical clock, a delay field, a log of named bit-flips and lost nodes). It does not open the store. A Rust store test drains that log and flips one bit in a published object; `get` then fails the BLAKE3 check.
 
-This is Phase 0: one node, a real mount, and conformance tests. The longer product map is in [SPEC.md](SPEC.md). If you are going to change code, start with [docs/maintainer.md](docs/maintainer.md) (layout, request path, tests, traps). IPC oracle: [docs/conformance/ipc.md](docs/conformance/ipc.md).
+GitHub Actions runs `make ci`: format, `cargo test`, and `mix test`, with no `/dev/fuse`. The live kernel mount is `tests/fuse_drive.rs`, skipped when `CI=1`. Kani and Miri run only on a local `make prepush`, and only on the buffer, xattr-size, and path-parse helpers.
+
+This is Phase 0. [SPEC.md](SPEC.md) is the roadmap for what is not in this tree. If you are going to change code, start with [docs/maintainer.md](docs/maintainer.md). IPC behavior of the store is [docs/conformance/ipc.md](docs/conformance/ipc.md).
 
 ## Layout
 
@@ -107,15 +109,15 @@ Reboot or log on again, then `Get-Service WinFsp.Launcher`. Phase 0 does not mou
 
 | Library | Role |
 |---------|------|
-| `arkfs_core` | Shared types and **FileAttributes** (FUSE / NFS / SMB3 / WebDAV / macOS) |
-| `simulation_harness` | Clock, delay, chaos |
-| `persistent_object_store` | Safe-write object store (fsync + quorum) |
-| `temporal_core` | Cactus-stack temporal engine |
+| `arkfs_core` | Shared types and `FileAttributes`. Pure projections for FUSE, NFS, SMB3, WebDAV, and macOS. Only FUSE is mounted. |
+| `simulation_harness` | Logical clock, delay presets, and a chaos log (Rust and Elixir). Not a cluster. |
+| `persistent_object_store` | Content-addressed blobs. `put` fsyncs, collects acks, then publishes. The mount uses `NoPeers`. `LocalQuorum` is extra directories under `replicas/` for tests. |
+| `temporal_core` | Versioned directory tree. Live lookup hides tombstones. `View::AsOf` returns the last version at or before the timestamp. |
 
 | App | Role |
 |-----|------|
-| `sim_runner` | Elixir harness scenarios. Store and temporal tests live in `cargo test`. |
-| `arkfs` | Single-node FUSE mount (`arkfs mount --data DIR MOUNTPOINT`). See [docs/fuse.md](docs/fuse.md). |
+| `sim_runner` | Elixir scenario catalog. It checks clock, delay, and the chaos log. Store and temporal tests are `cargo test`. |
+| `arkfs` | Single-node FUSE mount (`arkfs mount --data DIR MOUNTPOINT`, optional `--as-of N`). See [docs/fuse.md](docs/fuse.md). |
 
 Canonical metadata is a superset of what each protocol needs. Facades map through `arkfs_core::attr_map`. Details: [docs/attributes.md](docs/attributes.md).
 

@@ -2,7 +2,7 @@
 
 This is the onboarding document for engineers who have not worked on a
 filesystem, a content-addressed store, or a FUSE adapter before. Read this
-before changing code. Product intent lives in [SPEC.md](../SPEC.md); attribute
+before changing code. [SPEC.md](../SPEC.md) states what Phase 0 implements and lists phases 1–5 as absent. Attribute
 rules live in [attributes.md](attributes.md); FUSE user docs live in
 [fuse.md](fuse.md). IPC test oracle:
 [conformance/ipc.md](conformance/ipc.md). FUSE reachability:

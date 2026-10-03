@@ -49,6 +49,6 @@ make install      # $(PREFIX)/bin/arkfs (no Mix)
 ```
 
 Make is the monorepo organizer. Mix is used only inside each Elixir package directory.
-Rust `cargo test` covers store and temporal guarantees. `make sim` / `mix test`
+Rust `cargo test` covers the store and the temporal index. `make sim` / `mix test`
 exercise the Elixir harness (clock, delay, chaos log, history oracle) only.
 Those are not `make release`.

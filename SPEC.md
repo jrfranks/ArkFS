@@ -1,162 +1,85 @@
 **ArkFS Build Plan – Specification v0.3**
 
-Implementers of the current tree: start at [docs/maintainer.md](docs/maintainer.md). This spec is the product roadmap (phases 0–5); the code is Phase 0 plus a single-node FUSE facade.  
-**Ready for Grok Build Plan Mode Execution**
+The repository today is Phase 0: one Linux FUSE mount, a content-addressed store, and a versioned directory index. Start at [docs/maintainer.md](docs/maintainer.md). Phases 1–5 below are not implemented. There is no cluster, no TLA+ spec, no quantum-secure channel, no NFS/SMB/WebDAV server, and no UI in this tree. [docs/conformance/ipc.md](docs/conformance/ipc.md) records the same fact for the channel.
 
-**Project Name**: ArkFS  
-**Core Vision**: Sovereign continuous temporal distributed file system. Data follows the owner (Earth → Moon → Mars). Never-delete + arbitrary timestamp access. Zero penalty for current operations. Private clusters. Fully custom, modular, exhaustively tested code.
+**Project Name**: ArkFS
 
-**Tech Stack** (fixed):  
-- Elixir: high-level orchestration, policies, UI, ClusterManager, IntelligentMovement.  
-- Rust: all performance-critical paths and NIFs (TemporalCore, PersistentObjectStore, InternalChannel, NodeRuntime).  
+**What Phase 0 does**: A path keeps prior versions. `unlink` / `rmdir` tombstone the live name. `arkfs mount --as-of N` is a read-only view of logical commit N. The mount is `NoPeers` and `QuorumPolicy::OwnerOnly` (local fsync, then publish). `Quorum(n)` and `AllAlwaysOn` exist and are used with `LocalQuorum`, which writes extra directories. That is not a network.
 
-**IP**: MIT License (see [LICENSE](LICENSE)). Patent novel combinations (cactus-stack + intelligent interplanetary movement + safe-write object store).
+**Tech stack in this tree**:
+- Rust: `arkfs_core`, `persistent_object_store`, `temporal_core`, `fuse_facade`, `simulation_harness`, the `arkfs` binary.
+- Elixir: `simulation_harness` and `sim_runner`. Clock, delay field, chaos log, history-shape oracle. They do not open the store.
 
-**Development Mandate** (non-negotiable)  
-- 100% custom code.  
-- Every module independent with exhaustive tests against SimulationHarness (interplanetary variable clock, bit flips, node loss, data degradation).  
-- Formal verification (TLA+) for ClusterManager, InternalChannel consensus, healing logic.  
-- UI: fully magical with safe defaults and automation.  
-- Internal channel: quantum-secure + high compression mandatory.
+**IP**: MIT. See [LICENSE](LICENSE). No patent filing is part of this repository.
 
 ---
 
-### Master Build Plan (Phased, Actionable)
+### Phase 0 — in this repository
 
-**Phase 0 – Foundation (2–3 weeks)**  
-Goal: Core simulation and durable storage ready for testing.
+**Module 1: SimulationHarness** (Elixir and Rust)
 
-- **Module 1: SimulationHarness** (Elixir + Rust)  
-  Full interplanetary simulation (variable clock speed, bit flips, node loss, degradation).  
-  **API** (key functions):  
-  ```elixir
-  def simulate_environment(scenario: Scenario.t()) :: SimulationResult.t()
-  def inject_bit_flip(node_id, block_id) :: :ok
-  def set_mars_delay(delay_ms: u64) :: :ok
-  ```
-  **Functionality Diagram**  
-  ```mermaid
-  graph TD
-      A[Test Runner] --> B[Node Factory]
-      B --> C[Network Simulator]
-      C --> D[Power/Battery Simulator]
-      D --> E[Chaos Injector (bit flip, loss)]
-      E --> F[Validation Oracle]
-  ```
+Records a scenario. Does not flip bytes by itself and does not simulate a power system or a network stack.
 
-- **Module 2: PersistentObjectStore** (Rust)  
-  Fully custom object store. **No reply until data is safe** (local fsync + quorum replication).  
-  **API** (hand-off complete):  
-  ```rust
-  pub fn put(data: &[u8], quorum: QuorumPolicy) -> Result<ObjectID, Error>;  // blocks until safe
-  pub fn get(id: ObjectID) -> Result<Vec<u8>, Error>;
-  pub fn verify_integrity() -> Result<IntegrityReport, Error>;
-  ```
-  **Functionality Diagram**  
-  ```mermaid
-  graph TD
-      A[TemporalCore] --> B[put]
-      B --> C[Local fsync staging + checksum]
-      C --> D[InternalChannel quorum replication]
-      D --> E[Quorum Ack]
-      E --> F[Publish primary name]
-  ```
+```elixir
+def simulate_environment(scenario, opts \\ []) :: {:ok, SimulationResult.t()} | {:error, term()}
+def inject_bit_flip(state, node_id, block_id) :: map()
+def set_mars_delay(state, delay_ms) :: map()
+```
 
-- **Module 3: TemporalCore** (Rust)  
-  Cactus-stack engine.  
-  **API** (hand-off complete):  
-  ```rust
-  pub fn lookup_current(path: &str) -> Result<FileHandle, Error>;
-  pub fn lookup_at_timestamp(path: &str, ts: Timestamp) -> Result<FileHandle, Error>;
-  pub fn commit_branch(delta: BranchDelta) -> Result<(), Error>;
-  ```
+The Rust crate has the same split: `ChaosInjector::inject_bit_flip` / `take_bit_flips`, and `flip_bit_in_buffer`. The store test drains the log and flips one bit of a published object. `get` and `verify_integrity` then fail.
 
-**Phase 1 – Communications & Cluster (3 weeks)**  
-- **InternalChannel** (Rust) – full quantum-secure, compressed protocol.  
-- **ClusterManager** (Elixir) – private clusters, participation, trust.  
-- Integration tests: full Mars-delay cluster with safe-write guarantee.
+**Module 2: PersistentObjectStore** (Rust)
 
-**Phase 2 – Intelligent Layer & Tiering (3 weeks)**  
-- **IntelligentMovement** (Elixir + Rust NIFs).  
-- **ObjectTierAdapter** (Elixir + Rust).  
-- “Data follows the owner” end-to-end tests.
+`put` returns only after a local durable staging write, replication acks for the chosen `QuorumPolicy`, and `rename` plus directory `fsync` of a new or rewritten object. The FUSE process uses `open_isolated_store` (`NoPeers`). There is no InternalChannel.
 
-**Phase 3 – Node Facades & Mounts (4 weeks)**  
-- **NodeRuntime** (per platform).  
-- **MountFacade** (NFS/SMB/WebDAV/FUSE).  
-- Platform-specific UI (magical timeline).
+```rust
+pub fn put(&self, data: &[u8], quorum: QuorumPolicy) -> Result<ObjectId, ArkError>;
+pub fn get(&self, id: &ObjectId) -> Result<Vec<u8>, ArkError>;
+pub fn verify_integrity(&self) -> Result<IntegrityReport, ArkError>;
+```
 
-**Phase 4 – PolicyUI, Testing, Polish (2 weeks)**  
-- **PolicyUI & Tools**.  
-- Full system chaos + longevity tests in SimulationHarness.
+`QuorumPolicy` is `Quorum(NonZeroU32)` via `QuorumPolicy::n` (`n == 0` panics), `AllAlwaysOn`, and `OwnerOnly`.
 
-**Phase 5 – Packaging, White Paper, Patent Prep (1 week)**
+```mermaid
+graph TD
+    A[TemporalCore] --> B[put]
+    B --> C[fsync staging file and parent dir]
+    C --> D[ReplicationBackend acks]
+    D --> E[rename plus directory fsync]
+```
+
+`NoPeers` contributes zero remote acks. `OwnerOnly` is satisfied by the local write. `LocalQuorum` copies into `replicas/<name>/` on the same machine.
+
+**Module 3: TemporalCore** (Rust)
+
+In-memory cache of a durable index object named by the `temporal_index` anchor. Restarts reload it. Live lookup hides tombstones. `View::AsOf` returns the last version with `at <= ts`.
+
+```rust
+pub fn lookup_current(&self, path: &str) -> Result<FileHandle, ArkError>;
+pub fn lookup_at_timestamp(&self, path: &str, ts: Timestamp) -> Result<FileHandle, ArkError>;
+pub fn commit_branch(&self, delta: BranchDelta) -> Result<(), ArkError>;
+```
+
+Durability of bytes and of the index goes through `PersistentObjectStore` only.
 
 ---
 
-### Detailed Module Specifications (Hand-off Ready)
+### Not in this repository
 
-**1. SimulationHarness**  
-Description: Shared test framework for all modules.  
-API summary: `simulate_environment`, `inject_chaos`, `validate_temporal_consistency`.  
-Functionality diagram as above.  
-Tests: every other module depends on this.
+**Phase 1 – Communications & Cluster**
+- InternalChannel. No crate, no `connect` / `push_delta` / `request_historical` / `gossip_digest`, no QUIC, no post-quantum cipher, no compression codec.
+- ClusterManager. No Elixir cluster, no TLA+.
 
-**2. PersistentObjectStore**  
-Description: Custom object store enforcing “no reply until data is safe”.  
-Full API and diagram as above.  
-QuorumPolicy enum: `Quorum(n)` with `n >= 1`, `AllAlwaysOn`, `OwnerOnly`.
+**Phase 2 – Intelligent Layer & Tiering**
+- IntelligentMovement, ObjectTierAdapter, NIFs. Not in the tree.
 
-**3. TemporalCore**  
-Full API and diagram as above.  
-Must delegate durability exclusively to PersistentObjectStore.
+**Phase 3 – Node Facades & Mounts**
+- FUSE is the only mount. `attr_map` can project attributes toward NFS, SMB3, WebDAV, and macOS. Nothing serves those protocols. No WinFsp or macFUSE mount in Phase 0. No minifilter, no File Provider.
 
-**4. InternalChannel**  
-Description: Custom QUIC + post-quantum + compressed channel.  
-API: `connect`, `push_delta`, `request_historical`, `gossip_digest`.  
-Diagram: QUIC → Handshake → Compression → Router.
+**Phase 4 – PolicyUI**
+- No dashboard and no timeline UI.
 
-**5. ClusterManager**  
-Description: Private cluster lifecycle and policies.  
-API: `create_cluster`, `join_node`, `set_participation_level`, `follow_owner_config`.  
-Formal verification required.
+**Phase 5 – Packaging and white paper**
+- Not started. The FUSE binary installs with `make install`. That is not this phase.
 
-**6. IntelligentMovement**  
-Description: AI/Ant/epidemic/prefetch engine.  
-API: `on_owner_location_update`, `prefetch_for_timestamp`, `optimize_tiering`.  
-NIFs for ML/swarm heavy lifting.
-
-**7. NodeRuntime**  
-Description: Platform adapters.  
-API per platform (e.g., `start_windows_minifilter`, `start_ios_fileprovider`).
-
-**8. MountFacade**  
-Description: Protocol servers.  
-API: `serve_nfs`, `serve_smb`, etc.
-
-**9. ObjectTierAdapter**  
-Description: S3/Azure/GCS wrapper.  
-API: `store_to_object_tier`, `retrieve_from_tier`.
-
-**10. PolicyUI & Tools**  
-Description: Dashboard, CLI, timeline.  
-API: `render_timeline`, `apply_policy`.
-
----
-
-This specification is complete, self-contained, and ready for implementation in Grok build plan mode.
-
-**Build Plan Execution Order** (recommended):
-1. SimulationHarness + PersistentObjectStore (foundation).  
-2. InternalChannel + TemporalCore.  
-3. ClusterManager + IntelligentMovement.  
-4. NodeRuntime + MountFacade.  
-5. ObjectTierAdapter + PolicyUI.
-
-All code custom. All modules tested in simulation before integration.
-
-**Ready for hand-off**: Give this document to any Rust/Elixir team and they can start coding immediately.
-
-Confirm “Start coding PersistentObjectStore skeleton” or any change, and I will emit the first code artifacts + test files.
-
-ArkFS is now fully specified and ready to build.
+Do not treat the old "non-negotiable" list (TLA+, quantum-secure channel, exhaustive interplanetary simulation, zero-penalty current operations) as properties of the code. They are absent. Adding them is a new library, not a comment on Phase 0.
